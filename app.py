@@ -2,7 +2,11 @@ import os
 import json
 import uuid
 import streamlit as st
-from parser_engine import extract_jobs_from_pdf, parse_resume_file
+from parser_engine import (
+    extract_jobs_from_pdf,
+    parse_resume_file,
+    render_pdf_pages_as_highres_images,
+)
 from docx_exporter import export_all_to_master_docx
 
 st.set_page_config(page_title="Pre-Screened CV Portal", layout="wide")
@@ -179,28 +183,43 @@ def main_portal():
             cand["skills"] = st.text_area("Skills & Capabilities", cand["skills"], height=110, key=f"skl_{cand['id']}")
             cand["certificates"] = st.text_area("Certificates (Text List)", cand["certificates"], height=110, key=f"crt_{cand['id']}")
 
-            # Certificate Images Preview & Optional Upload
+            # Direct High-Resolution Certificate Insertion (PNG, JPG, or PDF)
             existing_cert_imgs = [p for p in cand.get("cert_images", []) if os.path.exists(p)]
             if existing_cert_imgs:
-                st.caption(f"Attached Certificate Images ({len(existing_cert_imgs)}):")
+                st.caption(f"Attached Certificates ({len(existing_cert_imgs)}):")
                 img_cols = st.columns(min(4, len(existing_cert_imgs)))
                 for i, c_img in enumerate(existing_cert_imgs):
-                    img_cols[i % 4].image(c_img, use_container_width=True)
+                    col = img_cols[i % 4]
+                    col.image(c_img, use_container_width=True)
+                    if col.button(f"Remove #{i+1}", key=f"rm_cert_{cand['id']}_{i}"):
+                        cand["cert_images"].remove(c_img)
+                        save_db(candidates)
+                        st.rerun()
 
             extra_certs = st.file_uploader(
-                "Add Certificate Images (Optional)",
-                type=["png", "jpg", "jpeg"],
+                "Insert Certificate Files (High-Res PNG, JPG, or PDF)",
+                type=["png", "jpg", "jpeg", "pdf"],
                 accept_multiple_files=True,
                 key=f"cert_up_{cand['id']}",
             )
             if extra_certs:
                 cert_list = cand.get("cert_images", [])
                 for ec in extra_certs:
-                    ec_path = os.path.join(SAVE_DIR, "cert_images", f"{cand['id']}_{ec.name}")
-                    if ec_path not in cert_list:
-                        with open(ec_path, "wb") as ef:
+                    ec_raw_path = os.path.join(SAVE_DIR, "cert_images", f"{cand['id']}_{ec.name}")
+                    if not os.path.exists(ec_raw_path):
+                        with open(ec_raw_path, "wb") as ef:
                             ef.write(ec.getbuffer())
-                        cert_list.append(ec_path)
+
+                        if ec.name.lower().endswith(".pdf"):
+                            rendered_pages = render_pdf_pages_as_highres_images(
+                                ec_raw_path, f"{cand['id']}_{os.path.splitext(ec.name)[0]}"
+                            )
+                            for rp in rendered_pages:
+                                if rp not in cert_list:
+                                    cert_list.append(rp)
+                        else:
+                            if ec_raw_path not in cert_list:
+                                cert_list.append(ec_raw_path)
                         updated = True
                 cand["cert_images"] = cert_list
 

@@ -47,7 +47,7 @@ JOB_LIST = [
 
 
 def is_noise_or_garbage(text):
-    """Filters out page numbers and garbled OCR artifacts from scanned stamps/signatures."""
+    """Filters out page numbers and garbled artifacts."""
     if not text:
         return True
     if re.match(r"^\s*page\s+\d+(?:\s+of\s+\d+)?\s*$", text, re.IGNORECASE):
@@ -57,19 +57,15 @@ def is_noise_or_garbage(text):
     if len(stripped) <= 1:
         return True
 
-    # Count actual letters/digits vs symbols/punctuation
     alnum_count = sum(c.isalnum() for c in stripped)
     letter_words = re.findall(r"[A-Za-z]{2,}", stripped)
 
-    # Discard lines with no real words (e.g., ",..;", "1·A1", ":\", ".,')")
     if not letter_words and not re.match(r"^\+?\d[\d\s\-]{6,}$", stripped):
         return True
 
-    # Discard OCR gibberish where symbols make up >35% of the line
     if len(stripped) > 3 and (alnum_count / len(stripped)) < 0.65:
         return True
 
-    # Discard lines packed with tildes, pipes, backslashes, or broken OCR clusters
     if re.search(r"[~\\|]{2,}|(?:[,\.;:'\"`~•]{2,}\s*){2,}", stripped):
         return True
 
@@ -101,49 +97,70 @@ def extract_jobs_from_pdf():
     return JOB_LIST
 
 
+def render_pdf_pages_as_highres_images(pdf_path, prefix_id):
+    """Renders PDF pages at crisp 300 DPI PNGs so certificates are sharp and readable."""
+    rendered_paths = []
+    try:
+        doc = fitz.open(pdf_path)
+        zoom_matrix = fitz.Matrix(300 / 72, 300 / 72)  # 300 DPI high-clarity render
+        for idx, page in enumerate(doc):
+            pix = page.get_pixmap(matrix=zoom_matrix, alpha=False)
+            out_path = os.path.join(CERT_IMG_DIR, f"{prefix_id}_page{idx+1}.png")
+            pix.save(out_path)
+            rendered_paths.append(out_path)
+    except Exception:
+        pass
+    return rendered_paths
+
+
 def extract_images_from_pdf(pdf_path, candidate_id):
     """
     Extracts:
-    1. Profile photo from page 1 (portrait/square headshot).
-    2. Certificate scan images from later pages or full-page scans.
+    1. Profile photo from page 1.
+    2. High-resolution (300 DPI) page renders for attached certificate pages (without low-res thumbnail extraction).
     """
     profile_photo = None
     cert_images = []
-    seen_xrefs = set()
 
     try:
         doc = fitz.open(pdf_path)
+        zoom_matrix = fitz.Matrix(300 / 72, 300 / 72)  # 300 DPI for crisp certificates
+
         for page_index, page in enumerate(doc):
             images = page.get_images(full=True)
             page_text = page.get_text("text").strip()
             clean_words = re.findall(r"[A-Za-z]{3,}", page_text)
 
-            for img_idx, img in enumerate(images):
-                xref = img[0]
-                if xref in seen_xrefs:
-                    continue
-                seen_xrefs.add(xref)
+            # Page 1: Extract candidate headshot photo
+            if page_index == 0:
+                for img in images:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    width, height = base_image["width"], base_image["height"]
+                    if 80 <= width <= 1000 and 80 <= height <= 1200:
+                        ext = base_image["ext"]
+                        photo_path = os.path.join(PHOTO_DIR, f"{candidate_id}.{ext}")
+                        with open(photo_path, "wb") as f:
+                            f.write(base_image["image"])
+                        profile_photo = photo_path
+                        break
 
-                base_image = doc.extract_image(xref)
-                width, height = base_image["width"], base_image["height"]
-                ext = base_image["ext"]
+            # Subsequent pages that contain embedded certificate images/scans -> Render full page at 300 DPI
+            if page_index >= 1 and len(images) > 0:
+                # Avoid capturing plain text pages that only have a tiny header/footer logo
+                has_large_image = False
+                for img in images:
+                    base_image = doc.extract_image(img[0])
+                    if base_image["width"] >= 300 and base_image["height"] >= 300:
+                        has_large_image = True
+                        break
 
-                # Ignore tiny decorative icons/lines
-                if width < 80 or height < 80:
-                    continue
-
-                # Page 1 reasonably sized portrait/headshot -> Profile Photo
-                if page_index == 0 and profile_photo is None and width <= 1000 and height <= 1200:
-                    photo_path = os.path.join(PHOTO_DIR, f"{candidate_id}.{ext}")
-                    with open(photo_path, "wb") as f:
-                        f.write(base_image["image"])
-                    profile_photo = photo_path
-                # Larger scan images or images on subsequent pages -> Certificate scans
-                elif page_index >= 1 or (width > 600 and height > 600 and len(clean_words) < 30):
-                    cert_path = os.path.join(CERT_IMG_DIR, f"{candidate_id}_p{page_index+1}_{img_idx}.{ext}")
-                    with open(cert_path, "wb") as f:
-                        f.write(base_image["image"])
+                if has_large_image or len(clean_words) < 35:
+                    pix = page.get_pixmap(matrix=zoom_matrix, alpha=False)
+                    cert_path = os.path.join(CERT_IMG_DIR, f"{candidate_id}_cert_p{page_index+1}.png")
+                    pix.save(cert_path)
                     cert_images.append(cert_path)
+
     except Exception:
         pass
 
@@ -151,7 +168,7 @@ def extract_images_from_pdf(pdf_path, candidate_id):
 
 
 def extract_images_from_docx(docx_path, candidate_id):
-    """Extracts profile photo (first image) and any certificate images from DOCX."""
+    """Extracts profile photo (first image) and original full-resolution certificate images from DOCX."""
     profile_photo = None
     cert_images = []
     try:
@@ -178,7 +195,7 @@ def extract_images_from_docx(docx_path, candidate_id):
 
 
 def extract_verbatim_lines_from_pdf(pdf_path):
-    """Extracts clean, readable lines in strict visual reading order, skipping scanned OCR garbage."""
+    """Extracts clean, readable lines in strict visual reading order."""
     doc = fitz.open(pdf_path)
     all_lines = []
     for page in doc:
@@ -212,7 +229,7 @@ def extract_verbatim_lines_from_docx(docx_path):
 
 
 def parse_resume_file(file_path, candidate_id, default_filename):
-    """Extracts exact verbatim text and images into standardized resume sections."""
+    """Extracts exact verbatim text and high-clarity images into standardized resume sections."""
     ext = os.path.splitext(file_path)[1].lower()
     lines = []
     photo_path = None
@@ -297,7 +314,6 @@ def parse_resume_file(file_path, candidate_id, default_filename):
             "licenses",
             "licenses & certifications",
         ],
-        # Stop capturing when unrelated sections appear (References, Declaration, etc.)
         "ignore": [
             "reference",
             "references",
