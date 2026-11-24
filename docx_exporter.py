@@ -1,4 +1,5 @@
 import os
+import re
 import io
 from PIL import Image
 from docx import Document
@@ -22,17 +23,54 @@ def remove_table_borders(table):
     tblPr.append(borders)
 
 
-def add_section_block(doc, title, content):
-    """Adds a clean unnumbered section header and detailed body text."""
+def is_subheader_line(line, section_type):
+    """Detects job titles, company names, date ranges, or degrees so they are bolded like a professional CV."""
+    stripped = line.lstrip("•-*▪➢➤ ").strip()
+    if not stripped or len(stripped) > 110:
+        return False
+
+    # Never treat full sentences ending with a period as a subheader
+    if stripped.endswith("."):
+        return False
+
+    # Lines containing date ranges (e.g., 2021 - 2024, Jan 2020 - Present)
+    if re.search(r"\b(19|20)\d{2}\b", stripped) and len(stripped) < 95:
+        return True
+
+    # Explicit subheader endings (e.g., "Senior Welder:", "ABC Engineering Sdn Bhd")
+    if stripped.endswith(":"):
+        return True
+
+    if section_type in ("experience", "education"):
+        role_or_org_words = (
+            "sdn bhd", "bhd", "ltd", "inc", "corp", "company", "engineering",
+            "services", "offshore", "oil", "gas", "petronas", "shell",
+            "university", "universiti", "college", "institute", "politeknik",
+            "diploma", "degree", "bachelor", "master", "certificate", "spm", "stpm",
+            "engineer", "supervisor", "technician", "welder", "fitter", "inspector",
+            "manager", "officer", "coordinator", "lead", "rigger", "operator",
+            "specialist", "advisor", "accountant", "controller", "storekeeper"
+        )
+        words = stripped.split()
+        if len(words) <= 10 and any(w in stripped.lower() for w in role_or_org_words):
+            return True
+
+    return False
+
+
+def add_section_block(doc, title, content, section_type="general"):
+    """Adds a bold unnumbered header, bold subheaders, and bulleted professional details."""
     clean_title = strip_header_numbering(title).upper()
     p_head = doc.add_paragraph()
-    p_head.paragraph_format.space_before = Pt(10)
-    p_head.paragraph_format.space_after = Pt(3)
+    p_head.paragraph_format.space_before = Pt(11)
+    p_head.paragraph_format.space_after = Pt(4)
+    p_head.paragraph_format.keep_with_next = True
     run_head = p_head.add_run(clean_title)
     run_head.bold = True
     run_head.font.size = Pt(11)
     run_head.font.color.rgb = RGBColor(20, 55, 100)
 
+    # Clean bottom divider line under main section header
     pPr = p_head._p.get_or_add_pPr()
     pBdr = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
@@ -43,14 +81,52 @@ def add_section_block(doc, title, content):
     pBdr.append(bottom)
     pPr.append(pBdr)
 
-    for line in content.split("\n"):
+    lines = [l.strip() for l in content.split("\n") if l.strip()]
+    if not lines:
+        return
+
+    for line in lines:
+        # Remove leading numbering beside subheaders/headers while preserving exact spelling
         clean_line = strip_header_numbering(line)
-        if clean_line:
-            p_body = doc.add_paragraph(clean_line)
-            p_body.paragraph_format.space_after = Pt(2)
-            p_body.paragraph_format.line_spacing = 1.15
-            for r in p_body.runs:
-                r.font.size = Pt(10)
+        has_existing_bullet = bool(re.match(r"^[•\-\*▪➢➤]\s*", clean_line))
+        text_body = re.sub(r"^[•\-\*▪➢➤]\s*", "", clean_line).strip()
+
+        if not text_body:
+            continue
+
+        # Objective is rendered as clean justified/left-aligned prose (unless explicitly bulleted)
+        if section_type == "objective" and not has_existing_bullet:
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(3)
+            p.paragraph_format.line_spacing = 1.15
+            r = p.add_run(text_body)
+            r.font.size = Pt(10)
+            continue
+
+        # Subheaders (Job Title, Company, Dates, Education Qualification) -> Bold, no bullet, no numbering
+        if is_subheader_line(text_body, section_type) and not has_existing_bullet:
+            p_sub = doc.add_paragraph()
+            p_sub.paragraph_format.space_before = Pt(5)
+            p_sub.paragraph_format.space_after = Pt(1.5)
+            p_sub.paragraph_format.keep_with_next = True
+            r_sub = p_sub.add_run(text_body)
+            r_sub.bold = True
+            r_sub.font.size = Pt(10)
+            r_sub.font.color.rgb = RGBColor(30, 30, 30)
+        else:
+            # Relevant details, duties, courses, skills, certificates -> Clean professional bullet points
+            p_bul = doc.add_paragraph()
+            p_bul.paragraph_format.left_indent = Inches(0.25)
+            p_bul.paragraph_format.first_line_indent = Inches(-0.15)
+            p_bul.paragraph_format.space_after = Pt(2)
+            p_bul.paragraph_format.line_spacing = 1.15
+
+            r_dot = p_bul.add_run("•  ")
+            r_dot.bold = True
+            r_dot.font.size = Pt(10)
+
+            r_txt = p_bul.add_run(text_body)
+            r_txt.font.size = Pt(10)
 
 
 def set_section_footer(section, position_text):
@@ -67,7 +143,7 @@ def set_section_footer(section, position_text):
 
 
 def get_compatible_image_stream(photo_path):
-    """Converts any image (WEBP, JP2, CMYK, etc.) into a python-docx compatible PNG stream."""
+    """Converts any image into a python-docx compatible PNG stream."""
     if not photo_path or not os.path.exists(photo_path):
         return None
     try:
@@ -96,6 +172,7 @@ def build_single_candidate_doc(candidate):
     cell_photo.width = Inches(1.7)
     cell_details.width = Inches(4.8)
 
+    # Top-Left Photo
     p_photo = cell_photo.paragraphs[0]
     img_stream = get_compatible_image_stream(candidate.get("photo_path"))
     if img_stream:
@@ -106,6 +183,7 @@ def build_single_candidate_doc(candidate):
         run_no_img.italic = True
         run_no_img.font.size = Pt(9)
 
+    # Top-Right Standardized Personal Details
     p_name = cell_details.paragraphs[0]
     p_name.paragraph_format.space_after = Pt(4)
     r_name = p_name.add_run(strip_header_numbering(candidate["name"]).upper())
@@ -132,12 +210,13 @@ def build_single_candidate_doc(candidate):
         r_val = p.add_run(str(val))
         r_val.font.size = Pt(9.5)
 
-    add_section_block(doc, "Objective", candidate["objective"])
-    add_section_block(doc, "Education", candidate["education"])
-    add_section_block(doc, "Course & Training Attended", candidate["courses"])
-    add_section_block(doc, "Working Experience", candidate["experience"])
-    add_section_block(doc, "Skills & Capabilities", candidate["skills"])
-    add_section_block(doc, "Certificates", candidate["certificates"])
+    # Standardized Resume Sections
+    add_section_block(doc, "Objective", candidate["objective"], section_type="objective")
+    add_section_block(doc, "Education", candidate["education"], section_type="education")
+    add_section_block(doc, "Course & Training Attended", candidate["courses"], section_type="courses")
+    add_section_block(doc, "Working Experience", candidate["experience"], section_type="experience")
+    add_section_block(doc, "Skills & Capabilities", candidate["skills"], section_type="skills")
+    add_section_block(doc, "Certificates", candidate["certificates"], section_type="certificates")
 
     return doc
 
