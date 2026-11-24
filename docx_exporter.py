@@ -7,7 +7,13 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docxcompose.composer import Composer
-from parser_engine import strip_header_numbering, is_noise_or_garbage, normalize_exact_text
+from parser_engine import (
+    strip_header_numbering,
+    strip_all_bullet_shapes,
+    is_noise_or_garbage,
+    normalize_exact_text,
+    ALL_BULLET_CHARS_PATTERN,
+)
 
 TEMPLATE_DOCX = "etc.docx"
 
@@ -25,7 +31,7 @@ def remove_table_borders(table):
 
 def is_subheader_line(line, section_type):
     """Detects job titles, company names, date ranges, or degrees so they are bolded like a professional CV."""
-    stripped = line.lstrip("•-*▪➢➤□■ ").strip()
+    stripped = strip_all_bullet_shapes(line)
     if not stripped or len(stripped) > 110 or stripped.endswith("."):
         return False
 
@@ -76,7 +82,7 @@ def add_section_header(doc, title):
 
 
 def add_section_block(doc, title, content, section_type="general", cert_images=None):
-    """Adds a bold unnumbered header, bold subheaders, bulleted details, and any certificate images."""
+    """Adds a bold unnumbered header, bold subheaders, and strictly • bullets."""
     lines = [
         normalize_exact_text(l).strip()
         for l in content.split("\n")
@@ -96,8 +102,9 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
 
     for line in lines:
         clean_line = strip_header_numbering(line)
-        has_existing_bullet = bool(re.match(r"^[•\-\*▪➢➤□■]\s*", clean_line))
-        text_body = re.sub(r"^[•\-\*▪➢➤□■\s]+", "", clean_line).strip()
+        has_existing_bullet = bool(re.match(ALL_BULLET_CHARS_PATTERN, clean_line))
+        # Strip ALL other bullet shapes so only • is used
+        text_body = strip_all_bullet_shapes(clean_line)
 
         if not text_body or is_noise_or_garbage(text_body):
             continue
@@ -126,6 +133,7 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             p_bul.paragraph_format.space_after = Pt(2)
             p_bul.paragraph_format.line_spacing = 1.15
 
+            # Exclusively use round • bullet
             r_dot = p_bul.add_run("•  ")
             r_dot.bold = True
             r_dot.font.size = Pt(10)
@@ -133,7 +141,6 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             r_txt = p_bul.add_run(text_body)
             r_txt.font.size = Pt(10)
 
-    # Embed scanned certificate images cleanly if present
     for stream in valid_cert_streams:
         p_img = doc.add_paragraph()
         p_img.paragraph_format.space_before = Pt(6)
@@ -178,7 +185,6 @@ def build_single_candidate_doc(candidate):
 
     img_stream = get_compatible_image_stream(candidate.get("photo_path"))
 
-    # If candidate has a photo, place Photo on Top-Left and Personal Details on Top-Right
     if img_stream:
         table = doc.add_table(rows=1, cols=2)
         table.autofit = False
@@ -195,12 +201,12 @@ def build_single_candidate_doc(candidate):
         details_container = cell_details
         p_name = details_container.paragraphs[0]
     else:
-        # No photo in resume -> Clean full-width personal details header without empty placeholder box
         details_container = doc
         p_name = doc.add_paragraph()
 
+    # First Heading: Candidate's Full Name
     p_name.paragraph_format.space_after = Pt(4)
-    r_name = p_name.add_run(strip_header_numbering(candidate["name"]).upper())
+    r_name = p_name.add_run(strip_all_bullet_shapes(strip_header_numbering(candidate["name"])).upper())
     r_name.bold = True
     r_name.font.size = Pt(14)
     r_name.font.color.rgb = RGBColor(20, 55, 100)

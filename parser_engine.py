@@ -45,6 +45,14 @@ JOB_LIST = [
     "Engineer",
 ]
 
+# Universal regex matching all non-standard bullet shapes to replace with •
+ALL_BULLET_CHARS_PATTERN = r"^[\s•\-\*▪▫■□●○◦‣⁃➢➣➤➔→»›◆◇❖✓✔+·∙∘]+"
+
+
+def strip_all_bullet_shapes(text):
+    """Removes every bullet character shape so only clean • bullets are applied later."""
+    return re.sub(ALL_BULLET_CHARS_PATTERN, "", text).strip()
+
 
 def is_noise_or_garbage(text):
     """Filters out page numbers and garbled artifacts."""
@@ -92,6 +100,80 @@ def strip_header_numbering(text):
     return cleaned.strip()
 
 
+def extract_candidate_name(lines, raw_text, default_filename):
+    """Finds the candidate's actual full name, ignoring cover-letter greetings like 'DEAR HIRING MANAGER'."""
+    # 1. Explicit "Name:" or "Full Name:" field
+    explicit_name = re.search(
+        r"^(?:Full\s+)?Name\s*[:\-]\s*([A-Za-z][A-Za-z\s\.'/@\-]{2,60})$",
+        raw_text,
+        re.MULTILINE | re.IGNORECASE,
+    )
+    if explicit_name:
+        return strip_header_numbering(explicit_name.group(1)).strip()
+
+    # 2. Cover letter sign-off (e.g., "Yours sincerely," followed by candidate's name)
+    signoff_match = re.search(
+        r"(?:Yours\s+(?:sincerely|faithfully)|Sincerely|Best\s+regards|Regards)[,\s]*\n+([A-Za-z][A-Za-z\s\.'/@\-]{2,55})",
+        raw_text,
+        re.IGNORECASE,
+    )
+    if signoff_match:
+        sig_name = signoff_match.group(1).strip().split("\n")[0].strip()
+        if 2 <= len(sig_name.split()) <= 6:
+            return strip_header_numbering(sig_name)
+
+    # 3. Scan top lines while skipping greetings, titles, dates, emails, and phone numbers
+    ignore_phrases = (
+        "dear",
+        "hiring manager",
+        "to whom",
+        "sir",
+        "madam",
+        "curriculum vitae",
+        "resume",
+        "application",
+        "cover letter",
+        "personal details",
+        "personal particulars",
+        "profile",
+        "objective",
+        "summary",
+        "contact",
+        "phone",
+        "email",
+        "address",
+        "position",
+        "date",
+        "ref:",
+        "subject:",
+        "re:",
+    )
+
+    for line in lines[:25]:
+        cleaned = strip_all_bullet_shapes(strip_header_numbering(line)).rstrip(",").strip()
+        lower_c = cleaned.lower()
+
+        if not cleaned or len(cleaned) < 4 or len(cleaned) > 55:
+            continue
+        if any(phrase in lower_c for phrase in ignore_phrases):
+            continue
+        if "@" in cleaned or re.search(r"\d{3,}", cleaned):
+            continue
+        if cleaned.endswith(".") or cleaned.endswith(":"):
+            continue
+
+        # Must look like a human name (2 to 6 words, letters/spaces/bin/binti/a/l/etc.)
+        words = cleaned.split()
+        if 2 <= len(words) <= 6 and re.match(r"^[A-Za-z\s\.'/@\-]+$", cleaned):
+            return cleaned
+
+    # 4. Clean fallback from uploaded filename
+    base = os.path.splitext(default_filename)[0]
+    base = re.sub(r"(?i)\b(resume|cv|curriculum[\s_\-]*vitae|updated|latest|new|\d+)\b", " ", base)
+    base = re.sub(r"[_\-]+", " ", base).strip()
+    return base if len(base) >= 3 else os.path.splitext(default_filename)[0]
+
+
 def extract_jobs_from_pdf():
     """Returns the standardized job position list for the dropdown."""
     return JOB_LIST
@@ -102,7 +184,7 @@ def render_pdf_pages_as_highres_images(pdf_path, prefix_id):
     rendered_paths = []
     try:
         doc = fitz.open(pdf_path)
-        zoom_matrix = fitz.Matrix(300 / 72, 300 / 72)  # 300 DPI high-clarity render
+        zoom_matrix = fitz.Matrix(300 / 72, 300 / 72)
         for idx, page in enumerate(doc):
             pix = page.get_pixmap(matrix=zoom_matrix, alpha=False)
             out_path = os.path.join(CERT_IMG_DIR, f"{prefix_id}_page{idx+1}.png")
@@ -114,24 +196,19 @@ def render_pdf_pages_as_highres_images(pdf_path, prefix_id):
 
 
 def extract_images_from_pdf(pdf_path, candidate_id):
-    """
-    Extracts:
-    1. Profile photo from page 1.
-    2. High-resolution (300 DPI) page renders for attached certificate pages (without low-res thumbnail extraction).
-    """
+    """Extracts profile photo from page 1 and high-res (300 DPI) certificate pages."""
     profile_photo = None
     cert_images = []
 
     try:
         doc = fitz.open(pdf_path)
-        zoom_matrix = fitz.Matrix(300 / 72, 300 / 72)  # 300 DPI for crisp certificates
+        zoom_matrix = fitz.Matrix(300 / 72, 300 / 72)
 
         for page_index, page in enumerate(doc):
             images = page.get_images(full=True)
             page_text = page.get_text("text").strip()
             clean_words = re.findall(r"[A-Za-z]{3,}", page_text)
 
-            # Page 1: Extract candidate headshot photo
             if page_index == 0:
                 for img in images:
                     xref = img[0]
@@ -145,9 +222,7 @@ def extract_images_from_pdf(pdf_path, candidate_id):
                         profile_photo = photo_path
                         break
 
-            # Subsequent pages that contain embedded certificate images/scans -> Render full page at 300 DPI
             if page_index >= 1 and len(images) > 0:
-                # Avoid capturing plain text pages that only have a tiny header/footer logo
                 has_large_image = False
                 for img in images:
                     base_image = doc.extract_image(img[0])
@@ -168,7 +243,7 @@ def extract_images_from_pdf(pdf_path, candidate_id):
 
 
 def extract_images_from_docx(docx_path, candidate_id):
-    """Extracts profile photo (first image) and original full-resolution certificate images from DOCX."""
+    """Extracts profile photo and original full-resolution certificate images from DOCX."""
     profile_photo = None
     cert_images = []
     try:
@@ -260,11 +335,7 @@ def parse_resume_file(file_path, candidate_id, default_filename):
         r"(?:Address|Location)\s*[:\-]?\s*(.+)", raw_text, re.IGNORECASE
     )
 
-    candidate_name = (
-        strip_header_numbering(lines[0])
-        if lines
-        else os.path.splitext(default_filename)[0]
-    )
+    candidate_name = extract_candidate_name(lines, raw_text, default_filename)
 
     section_headers = {
         "objective": [
@@ -328,7 +399,7 @@ def parse_resume_file(file_path, candidate_id, default_filename):
     sections = {k: [] for k in section_headers}
     current_section = None
 
-    for line in lines[1:]:
+    for line in lines:
         cleaned = strip_header_numbering(line)
         lower_clean = cleaned.lower().rstrip(":").strip()
 
