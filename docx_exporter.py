@@ -1,4 +1,6 @@
 import os
+import io
+from PIL import Image
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.oxml import OxmlElement
@@ -64,6 +66,21 @@ def set_section_footer(section, position_text):
         run.font.color.rgb = RGBColor(80, 80, 80)
 
 
+def get_compatible_image_stream(photo_path):
+    """Converts any image (WEBP, JP2, CMYK, etc.) into a python-docx compatible PNG stream."""
+    if not photo_path or not os.path.exists(photo_path):
+        return None
+    try:
+        with Image.open(photo_path) as img:
+            img = img.convert("RGB")
+            img_stream = io.BytesIO()
+            img.save(img_stream, format="PNG")
+            img_stream.seek(0)
+            return img_stream
+    except Exception:
+        return None
+
+
 def build_single_candidate_doc(candidate):
     """Creates a single candidate document based on etc.docx template."""
     doc = Document(TEMPLATE_DOCX) if os.path.exists(TEMPLATE_DOCX) else Document()
@@ -80,10 +97,10 @@ def build_single_candidate_doc(candidate):
     cell_details.width = Inches(4.8)
 
     p_photo = cell_photo.paragraphs[0]
-    photo_path = candidate.get("photo_path")
-    if photo_path and os.path.exists(photo_path):
+    img_stream = get_compatible_image_stream(candidate.get("photo_path"))
+    if img_stream:
         run_img = p_photo.add_run()
-        run_img.add_picture(photo_path, width=Inches(1.45))
+        run_img.add_picture(img_stream, width=Inches(1.45))
     else:
         run_no_img = p_photo.add_run("[Candidate Photo]")
         run_no_img.italic = True
