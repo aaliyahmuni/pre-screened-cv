@@ -45,17 +45,16 @@ JOB_LIST = [
     "Engineer",
 ]
 
-# Universal regex matching all non-standard bullet shapes to replace with •
 ALL_BULLET_CHARS_PATTERN = r"^[\s•\-\*▪▫■□●○◦‣⁃➢➣➤➔→»›◆◇❖✓✔+·∙∘]+"
 
 
 def strip_all_bullet_shapes(text):
-    """Removes every bullet character shape so only clean • bullets are applied later."""
+    """Removes every bullet shape so only clean • bullets are applied."""
     return re.sub(ALL_BULLET_CHARS_PATTERN, "", text).strip()
 
 
 def is_noise_or_garbage(text):
-    """Filters out page numbers and garbled artifacts."""
+    """Filters out page numbers and garbled OCR artifacts."""
     if not text:
         return True
     if re.match(r"^\s*page\s+\d+(?:\s+of\s+\d+)?\s*$", text, re.IGNORECASE):
@@ -81,7 +80,7 @@ def is_noise_or_garbage(text):
 
 
 def normalize_exact_text(text):
-    """Normalizes Unicode ligatures and removes PDF Wingdings/square bullet glyphs."""
+    """Normalizes Unicode ligatures and strips private-use Wingdings/box glyphs."""
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", text)
@@ -91,7 +90,7 @@ def normalize_exact_text(text):
 
 
 def strip_header_numbering(text):
-    """Removes any numbering beside headers and subheaders while keeping exact wording."""
+    """Removes any numbering beside headers and subheaders while preserving exact wording."""
     cleaned = re.sub(
         r"^\s*(?:[\d]+(?:\.[\d]+)*[\.\)\-:]?|[A-Za-z][\.\)])\s+",
         "",
@@ -101,8 +100,7 @@ def strip_header_numbering(text):
 
 
 def extract_candidate_name(lines, raw_text, default_filename):
-    """Finds the candidate's actual full name, ignoring cover-letter greetings like 'DEAR HIRING MANAGER'."""
-    # 1. Explicit "Name:" or "Full Name:" field
+    """Extracts the candidate's actual full name, skipping cover-letter salutations."""
     explicit_name = re.search(
         r"^(?:Full\s+)?Name\s*[:\-]\s*([A-Za-z][A-Za-z\s\.'/@\-]{2,60})$",
         raw_text,
@@ -111,7 +109,6 @@ def extract_candidate_name(lines, raw_text, default_filename):
     if explicit_name:
         return strip_header_numbering(explicit_name.group(1)).strip()
 
-    # 2. Cover letter sign-off (e.g., "Yours sincerely," followed by candidate's name)
     signoff_match = re.search(
         r"(?:Yours\s+(?:sincerely|faithfully)|Sincerely|Best\s+regards|Regards)[,\s]*\n+([A-Za-z][A-Za-z\s\.'/@\-]{2,55})",
         raw_text,
@@ -122,31 +119,11 @@ def extract_candidate_name(lines, raw_text, default_filename):
         if 2 <= len(sig_name.split()) <= 6:
             return strip_header_numbering(sig_name)
 
-    # 3. Scan top lines while skipping greetings, titles, dates, emails, and phone numbers
     ignore_phrases = (
-        "dear",
-        "hiring manager",
-        "to whom",
-        "sir",
-        "madam",
-        "curriculum vitae",
-        "resume",
-        "application",
-        "cover letter",
-        "personal details",
-        "personal particulars",
-        "profile",
-        "objective",
-        "summary",
-        "contact",
-        "phone",
-        "email",
-        "address",
-        "position",
-        "date",
-        "ref:",
-        "subject:",
-        "re:",
+        "dear", "hiring manager", "to whom", "sir", "madam", "curriculum vitae",
+        "resume", "application", "cover letter", "personal details",
+        "personal particulars", "profile", "objective", "summary", "contact",
+        "phone", "email", "address", "position", "date", "ref:", "subject:", "re:",
     )
 
     for line in lines[:25]:
@@ -162,16 +139,58 @@ def extract_candidate_name(lines, raw_text, default_filename):
         if cleaned.endswith(".") or cleaned.endswith(":"):
             continue
 
-        # Must look like a human name (2 to 6 words, letters/spaces/bin/binti/a/l/etc.)
         words = cleaned.split()
         if 2 <= len(words) <= 6 and re.match(r"^[A-Za-z\s\.'/@\-]+$", cleaned):
             return cleaned
 
-    # 4. Clean fallback from uploaded filename
     base = os.path.splitext(default_filename)[0]
     base = re.sub(r"(?i)\b(resume|cv|curriculum[\s_\-]*vitae|updated|latest|new|\d+)\b", " ", base)
     base = re.sub(r"[_\-]+", " ", base).strip()
     return base if len(base) >= 3 else os.path.splitext(default_filename)[0]
+
+
+def extract_personal_details(lines, raw_text):
+    """Extracts structured personal details accurately."""
+    email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", raw_text)
+    phone_match = re.search(r"(\+?\d[\d\s\-\(\)]{7,16}\d)", raw_text)
+    gender_match = re.search(r"\b(?:Gender|Sex)\s*[:\-]?\s*(Male|Female)\b|\b(Male|Female)\b", raw_text, re.IGNORECASE)
+    age_match = re.search(r"\b(?:Age\s*[:\-]?\s*(\d{2})|(\d{2})\s*years\s*old)\b", raw_text, re.IGNORECASE)
+    marital_match = re.search(r"\b(?:Marital\s*Status\s*[:\-]?\s*)?(Single|Married|Divorced|Widowed)\b", raw_text, re.IGNORECASE)
+    nationality_match = re.search(r"Nationality\s*[:\-]?\s*([A-Za-z\s]{3,30})", raw_text, re.IGNORECASE)
+
+    # Multi-line aware address extraction
+    address_val = "Not Provided"
+    for idx, line in enumerate(lines):
+        addr_m = re.match(r"^(?:Permanent\s+|Current\s+|Home\s+)?(?:Address|Location)\s*[:\-]?\s*(.*)$", line, re.IGNORECASE)
+        if addr_m:
+            parts = [addr_m.group(1).strip()] if addr_m.group(1).strip() else []
+            # Check next 1-2 lines if they contain postcode/city/state (e.g., 98000 Miri, Sarawak)
+            for nxt in lines[idx + 1 : idx + 3]:
+                if re.search(r"\b\d{5}\b|sarawak|sabah|johor|selangor|kuala lumpur|penang|perak|pahang|kedah|kelantan|terengganu|melaka|negeri sembilan|perlis|malaysia", nxt, re.IGNORECASE) and ":" not in nxt:
+                    parts.append(nxt.strip())
+                else:
+                    break
+            if parts:
+                address_val = ", ".join(parts)
+            break
+
+    gender_val = "Not Provided"
+    if gender_match:
+        gender_val = (gender_match.group(1) or gender_match.group(2)).capitalize()
+
+    nat_val = "Not Provided"
+    if nationality_match:
+        nat_val = nationality_match.group(1).strip().split("\n")[0].strip()
+
+    return {
+        "phone": phone_match.group(1).strip() if phone_match else "Not Provided",
+        "email": email_match.group(0).strip() if email_match else "Not Provided",
+        "gender": gender_val,
+        "age": (age_match.group(1) or age_match.group(2)) if age_match else "Not Provided",
+        "nationality": nat_val,
+        "marital_status": marital_match.group(1).capitalize() if marital_match else "Not Provided",
+        "address": address_val,
+    }
 
 
 def extract_jobs_from_pdf():
@@ -318,81 +337,37 @@ def parse_resume_file(file_path, candidate_id, default_filename):
         lines = extract_verbatim_lines_from_docx(file_path)
 
     raw_text = "\n".join(lines)
-
-    email_match = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", raw_text)
-    phone_match = re.search(r"(\+?\d[\d\s\-\(\)]{7,16}\d)", raw_text)
-    gender_match = re.search(r"\b(Male|Female)\b", raw_text, re.IGNORECASE)
-    age_match = re.search(
-        r"\b(?:Age\s*[:\-]?\s*(\d{2})|(\d{2})\s*years\s*old)\b", raw_text, re.IGNORECASE
-    )
-    marital_match = re.search(
-        r"\b(Single|Married|Divorced|Widowed)\b", raw_text, re.IGNORECASE
-    )
-    nationality_match = re.search(
-        r"Nationality\s*[:\-]?\s*([A-Za-z\s]+)", raw_text, re.IGNORECASE
-    )
-    address_match = re.search(
-        r"(?:Address|Location)\s*[:\-]?\s*(.+)", raw_text, re.IGNORECASE
-    )
-
     candidate_name = extract_candidate_name(lines, raw_text, default_filename)
+    personal = extract_personal_details(lines, raw_text)
 
     section_headers = {
         "objective": [
-            "objective",
-            "career objective",
-            "professional summary",
-            "summary",
-            "profile",
-            "about me",
+            "objective", "career objective", "professional summary",
+            "executive summary", "summary", "profile", "about me",
         ],
         "education": [
-            "education",
-            "academic",
-            "academic qualification",
-            "qualification",
-            "educational background",
+            "education", "academic", "academic qualification",
+            "academic background", "qualification", "educational background",
         ],
         "courses": [
-            "course",
-            "training",
-            "courses & training",
-            "course & training attended",
-            "training attended",
-            "workshops",
+            "course", "training", "courses & training", "course & training",
+            "course & training attended", "training attended", "workshops", "seminars",
         ],
         "experience": [
-            "experience",
-            "working experience",
-            "work experience",
-            "employment",
-            "employment history",
-            "career history",
+            "experience", "working experience", "work experience",
+            "employment", "employment history", "career history", "professional experience",
         ],
         "skills": [
-            "skills",
-            "capabilities",
-            "skills & capabilities",
-            "key skills",
-            "competencies",
-            "technical skills",
+            "skills", "capabilities", "skills & capabilities",
+            "key skills", "core competencies", "competencies", "technical skills",
         ],
         "certificates": [
-            "certificate",
-            "certificates",
-            "certification",
-            "certifications",
-            "licenses",
-            "licenses & certifications",
+            "certificate", "certificates", "certification",
+            "certifications", "licenses", "licenses & certifications", "professional certificates",
         ],
         "ignore": [
-            "reference",
-            "references",
-            "character reference",
-            "character references",
-            "referee",
-            "referees",
-            "declaration",
+            "reference", "references", "character reference",
+            "character references", "referee", "referees", "declaration",
         ],
     }
 
@@ -401,13 +376,13 @@ def parse_resume_file(file_path, candidate_id, default_filename):
 
     for line in lines:
         cleaned = strip_header_numbering(line)
-        lower_clean = cleaned.lower().rstrip(":").strip()
+        lower_clean = strip_all_bullet_shapes(cleaned).lower().rstrip(":").strip()
 
         matched_key = None
-        if len(cleaned) < 50:
+        if len(cleaned) < 55:
             for key, aliases in section_headers.items():
                 if lower_clean in aliases or any(
-                    lower_clean.startswith(a) and len(lower_clean) < 38 for a in aliases
+                    lower_clean.startswith(a) and len(lower_clean) < 42 for a in aliases
                 ):
                     matched_key = key
                     break
@@ -425,23 +400,17 @@ def parse_resume_file(file_path, candidate_id, default_filename):
         "cert_images": cert_images,
         "position": "",
         "name": candidate_name,
-        "phone": phone_match.group(1).strip() if phone_match else "Not Provided",
-        "email": email_match.group(0).strip() if email_match else "Not Provided",
-        "gender": gender_match.group(1).capitalize() if gender_match else "Not Provided",
-        "age": (age_match.group(1) or age_match.group(2)) if age_match else "Not Provided",
-        "nationality": (
-            nationality_match.group(1).strip().split("\n")[0]
-            if nationality_match
-            else "Not Provided"
-        ),
-        "marital_status": (
-            marital_match.group(1).capitalize() if marital_match else "Not Provided"
-        ),
-        "address": address_match.group(1).strip() if address_match else "Not Provided",
+        "phone": personal["phone"],
+        "email": personal["email"],
+        "gender": personal["gender"],
+        "age": personal["age"],
+        "nationality": personal["nationality"],
+        "marital_status": personal["marital_status"],
+        "address": personal["address"],
         "objective": "\n".join(sections["objective"]) or "Not Provided",
         "education": "\n".join(sections["education"]) or "Not Provided",
         "courses": "\n".join(sections["courses"]) or "None listed.",
-        "experience": "\n".join(sections["experience"]) or "",
+        "experience": "\n".join(sections["experience"]) or raw_text,
         "skills": "\n".join(sections["skills"]) or "None listed.",
-        "certificates": "\n".join(sections["certificates"]) or "",
+        "certificates": "\n".join(sections["certificates"]) or "None listed.",
     }
