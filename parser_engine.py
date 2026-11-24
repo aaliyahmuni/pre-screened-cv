@@ -1,12 +1,46 @@
 import os
 import re
 import fitz  # PyMuPDF
-import streamlit as st
 from docx import Document
 
-PDF_JOB_FILE = "EXHIBIT I - SCOPE OF WORKS RFP-000000194145.pdf"
 PHOTO_DIR = os.path.join("saved_resumes", "photos")
 os.makedirs(PHOTO_DIR, exist_ok=True)
+
+JOB_LIST = [
+    "Service Technician",
+    "Signalman",
+    "Lorry Driver",
+    "Mason",
+    "General Labor",
+    "Welding Inspector (CSWIP)",
+    "Welder",
+    "Technical Executive - Material Coordinator",
+    "Technical Executive - Scheduler",
+    "Storekeeper",
+    "Senior Welder",
+    "Senior Pipe Fitter",
+    "Senior Mechanical Fitter",
+    "Scaffolding Inspectors",
+    "Rigger",
+    "Pipe Fitter",
+    "Millwright",
+    "Mechanical Fitter",
+    "Machinist",
+    "Lifting Supervisor",
+    "HSE Supervisor",
+    "Document Controller",
+    "Chargeman B0/B4",
+    "EHS Team Lead",
+    "Logistic EHS Specialist",
+    "Junior Accountant",
+    "Senior Engineer",
+    "Lead Drilling Advisor",
+    "IT End User Support",
+    "Technician",
+    "Engineer (Specialist Telecom/OEM)",
+    "Telecom Rigger / Abseilor",
+    "Engineer",
+]
 
 
 def strip_header_numbering(text):
@@ -15,43 +49,9 @@ def strip_header_numbering(text):
     return cleaned.strip()
 
 
-@st.cache_data
 def extract_jobs_from_pdf():
-    """Reads EXHIBIT I PDF once and caches position titles for the dropdown."""
-    fallback_jobs = [
-        "Project Manager",
-        "Site Supervisor",
-        "HSE Officer",
-        "QA/QC Inspector",
-        "Planning Engineer",
-        "Mechanical Technician",
-        "Electrical Technician",
-    ]
-    if not os.path.exists(PDF_JOB_FILE):
-        return fallback_jobs
-
-    jobs = []
-    try:
-        doc = fitz.open(PDF_JOB_FILE)
-        full_text = ""
-        for page in doc:
-            full_text += page.get_text("text") + "\n"
-
-        lines = [line.strip() for line in full_text.split("\n") if line.strip()]
-        role_keywords = (
-            "engineer", "manager", "supervisor", "officer", "technician",
-            "coordinator", "inspector", "specialist", "lead", "administrator",
-            "foreman", "operator", "helper", "clerk", "analyst", "planner"
-        )
-        for line in lines:
-            clean_line = strip_header_numbering(line)
-            if 4 <= len(clean_line) <= 75 and any(k in clean_line.lower() for k in role_keywords):
-                if clean_line not in jobs and not clean_line.endswith("."):
-                    jobs.append(clean_line)
-    except Exception:
-        pass
-
-    return jobs if jobs else fallback_jobs
+    """Returns the standardized job position list for the dropdown."""
+    return JOB_LIST
 
 
 def extract_photo_from_pdf(pdf_path, candidate_id):
