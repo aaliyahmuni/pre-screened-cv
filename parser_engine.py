@@ -5,7 +5,9 @@ import fitz  # PyMuPDF
 from docx import Document
 
 PHOTO_DIR = os.path.join("saved_resumes", "photos")
+CERT_IMG_DIR = os.path.join("saved_resumes", "cert_images")
 os.makedirs(PHOTO_DIR, exist_ok=True)
+os.makedirs(CERT_IMG_DIR, exist_ok=True)
 
 JOB_LIST = [
     "Service Technician",
@@ -44,13 +46,43 @@ JOB_LIST = [
 ]
 
 
+def is_noise_or_garbage(text):
+    """Filters out page numbers and garbled OCR artifacts from scanned stamps/signatures."""
+    if not text:
+        return True
+    if re.match(r"^\s*page\s+\d+(?:\s+of\s+\d+)?\s*$", text, re.IGNORECASE):
+        return True
+
+    stripped = text.strip()
+    if len(stripped) <= 1:
+        return True
+
+    # Count actual letters/digits vs symbols/punctuation
+    alnum_count = sum(c.isalnum() for c in stripped)
+    letter_words = re.findall(r"[A-Za-z]{2,}", stripped)
+
+    # Discard lines with no real words (e.g., ",..;", "1·A1", ":\", ".,')")
+    if not letter_words and not re.match(r"^\+?\d[\d\s\-]{6,}$", stripped):
+        return True
+
+    # Discard OCR gibberish where symbols make up >35% of the line
+    if len(stripped) > 3 and (alnum_count / len(stripped)) < 0.65:
+        return True
+
+    # Discard lines packed with tildes, pipes, backslashes, or broken OCR clusters
+    if re.search(r"[~\\|]{2,}|(?:[,\.;:'\"`~•]{2,}\s*){2,}", stripped):
+        return True
+
+    return False
+
+
 def normalize_exact_text(text):
-    """Normalizes Unicode ligatures (fi, fl, etc.) without altering spelling."""
+    """Normalizes Unicode ligatures and removes PDF Wingdings/square bullet glyphs."""
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", text)
-    # Remove non-printable control characters while keeping exact words & punctuation
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"[\ue000-\uf8ff\u25a0-\u27bf]", "", text)
     return text.strip()
 
 
@@ -69,90 +101,128 @@ def extract_jobs_from_pdf():
     return JOB_LIST
 
 
-def extract_photo_from_pdf(pdf_path, candidate_id):
-    """Extracts the first valid profile image from a PDF resume."""
+def extract_images_from_pdf(pdf_path, candidate_id):
+    """
+    Extracts:
+    1. Profile photo from page 1 (portrait/square headshot).
+    2. Certificate scan images from later pages or full-page scans.
+    """
+    profile_photo = None
+    cert_images = []
+    seen_xrefs = set()
+
     try:
         doc = fitz.open(pdf_path)
-        for page_index in range(min(2, len(doc))):
-            images = doc[page_index].get_images(full=True)
-            for img in images:
+        for page_index, page in enumerate(doc):
+            images = page.get_images(full=True)
+            page_text = page.get_text("text").strip()
+            clean_words = re.findall(r"[A-Za-z]{3,}", page_text)
+
+            for img_idx, img in enumerate(images):
                 xref = img[0]
+                if xref in seen_xrefs:
+                    continue
+                seen_xrefs.add(xref)
+
                 base_image = doc.extract_image(xref)
                 width, height = base_image["width"], base_image["height"]
-                if 60 <= width <= 1500 and 60 <= height <= 1500:
-                    ext = base_image["ext"]
+                ext = base_image["ext"]
+
+                # Ignore tiny decorative icons/lines
+                if width < 80 or height < 80:
+                    continue
+
+                # Page 1 reasonably sized portrait/headshot -> Profile Photo
+                if page_index == 0 and profile_photo is None and width <= 1000 and height <= 1200:
                     photo_path = os.path.join(PHOTO_DIR, f"{candidate_id}.{ext}")
                     with open(photo_path, "wb") as f:
                         f.write(base_image["image"])
-                    return photo_path
+                    profile_photo = photo_path
+                # Larger scan images or images on subsequent pages -> Certificate scans
+                elif page_index >= 1 or (width > 600 and height > 600 and len(clean_words) < 30):
+                    cert_path = os.path.join(CERT_IMG_DIR, f"{candidate_id}_p{page_index+1}_{img_idx}.{ext}")
+                    with open(cert_path, "wb") as f:
+                        f.write(base_image["image"])
+                    cert_images.append(cert_path)
     except Exception:
         pass
-    return None
+
+    return profile_photo, cert_images
 
 
-def extract_photo_from_docx(docx_path, candidate_id):
-    """Extracts embedded profile picture from a DOCX resume."""
+def extract_images_from_docx(docx_path, candidate_id):
+    """Extracts profile photo (first image) and any certificate images from DOCX."""
+    profile_photo = None
+    cert_images = []
     try:
         doc = Document(docx_path)
+        idx = 0
         for rel in doc.part.rels.values():
             if "image" in rel.target_ref:
                 img_bytes = rel.target_part.blob
                 ext = rel.target_ref.split(".")[-1]
-                photo_path = os.path.join(PHOTO_DIR, f"{candidate_id}.{ext}")
-                with open(photo_path, "wb") as f:
-                    f.write(img_bytes)
-                return photo_path
+                if idx == 0:
+                    photo_path = os.path.join(PHOTO_DIR, f"{candidate_id}.{ext}")
+                    with open(photo_path, "wb") as f:
+                        f.write(img_bytes)
+                    profile_photo = photo_path
+                else:
+                    cert_path = os.path.join(CERT_IMG_DIR, f"{candidate_id}_cert_{idx}.{ext}")
+                    with open(cert_path, "wb") as f:
+                        f.write(img_bytes)
+                    cert_images.append(cert_path)
+                idx += 1
     except Exception:
         pass
-    return None
+    return profile_photo, cert_images
 
 
 def extract_verbatim_lines_from_pdf(pdf_path):
-    """Extracts exact lines from PDF in strict top-to-bottom visual reading order."""
+    """Extracts clean, readable lines in strict visual reading order, skipping scanned OCR garbage."""
     doc = fitz.open(pdf_path)
     all_lines = []
     for page in doc:
-        # sort=True ensures exact top-to-bottom, left-to-right reading order without scrambled words
         blocks = page.get_text("blocks", sort=True)
         for b in blocks:
-            if b[6] == 0:  # Text block only
+            if b[6] == 0:
                 block_text = normalize_exact_text(b[4])
                 for line in block_text.split("\n"):
                     clean = line.strip()
-                    if clean:
+                    if clean and not is_noise_or_garbage(clean):
                         all_lines.append(clean)
     return all_lines
 
 
 def extract_verbatim_lines_from_docx(docx_path):
-    """Extracts exact lines from paragraphs and tables in a DOCX resume."""
+    """Extracts clean lines from paragraphs and tables in a DOCX resume."""
     doc = Document(docx_path)
     all_lines = []
     for p in doc.paragraphs:
         clean = normalize_exact_text(p.text)
-        if clean:
+        if clean and not is_noise_or_garbage(clean):
             all_lines.append(clean)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     clean = normalize_exact_text(p.text)
-                    if clean and clean not in all_lines:
+                    if clean and not is_noise_or_garbage(clean) and clean not in all_lines:
                         all_lines.append(clean)
     return all_lines
 
 
 def parse_resume_file(file_path, candidate_id, default_filename):
-    """Extracts exact verbatim text and categorizes into standardized resume sections."""
+    """Extracts exact verbatim text and images into standardized resume sections."""
     ext = os.path.splitext(file_path)[1].lower()
     lines = []
     photo_path = None
+    cert_images = []
 
     if ext == ".pdf":
-        photo_path = extract_photo_from_pdf(file_path, candidate_id)
+        photo_path, cert_images = extract_images_from_pdf(file_path, candidate_id)
         lines = extract_verbatim_lines_from_pdf(file_path)
     elif ext == ".docx":
-        photo_path = extract_photo_from_docx(file_path, candidate_id)
+        photo_path, cert_images = extract_images_from_docx(file_path, candidate_id)
         lines = extract_verbatim_lines_from_docx(file_path)
 
     raw_text = "\n".join(lines)
@@ -227,6 +297,16 @@ def parse_resume_file(file_path, candidate_id, default_filename):
             "licenses",
             "licenses & certifications",
         ],
+        # Stop capturing when unrelated sections appear (References, Declaration, etc.)
+        "ignore": [
+            "reference",
+            "references",
+            "character reference",
+            "character references",
+            "referee",
+            "referees",
+            "declaration",
+        ],
     }
 
     sections = {k: [] for k in section_headers}
@@ -247,8 +327,7 @@ def parse_resume_file(file_path, candidate_id, default_filename):
 
         if matched_key:
             current_section = matched_key
-        elif current_section:
-            # Preserve exact verbatim wording of every line
+        elif current_section and current_section != "ignore":
             sections[current_section].append(cleaned)
 
     return {
@@ -256,6 +335,7 @@ def parse_resume_file(file_path, candidate_id, default_filename):
         "filename": default_filename,
         "file_path": file_path,
         "photo_path": photo_path,
+        "cert_images": cert_images,
         "position": "",
         "name": candidate_name,
         "phone": phone_match.group(1).strip() if phone_match else "Not Provided",
@@ -274,7 +354,7 @@ def parse_resume_file(file_path, candidate_id, default_filename):
         "objective": "\n".join(sections["objective"]) or "Not Provided",
         "education": "\n".join(sections["education"]) or "Not Provided",
         "courses": "\n".join(sections["courses"]) or "None listed.",
-        "experience": "\n".join(sections["experience"]) or raw_text,
+        "experience": "\n".join(sections["experience"]) or "",
         "skills": "\n".join(sections["skills"]) or "None listed.",
-        "certificates": "\n".join(sections["certificates"]) or "None listed.",
+        "certificates": "\n".join(sections["certificates"]) or "",
     }

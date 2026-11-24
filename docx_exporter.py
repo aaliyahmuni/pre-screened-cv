@@ -7,7 +7,7 @@ from docx.shared import Inches, Pt, RGBColor
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docxcompose.composer import Composer
-from parser_engine import strip_header_numbering
+from parser_engine import strip_header_numbering, is_noise_or_garbage, normalize_exact_text
 
 TEMPLATE_DOCX = "etc.docx"
 
@@ -25,19 +25,13 @@ def remove_table_borders(table):
 
 def is_subheader_line(line, section_type):
     """Detects job titles, company names, date ranges, or degrees so they are bolded like a professional CV."""
-    stripped = line.lstrip("•-*▪➢➤ ").strip()
-    if not stripped or len(stripped) > 110:
+    stripped = line.lstrip("•-*▪➢➤□■ ").strip()
+    if not stripped or len(stripped) > 110 or stripped.endswith("."):
         return False
 
-    # Never treat full sentences ending with a period as a subheader
-    if stripped.endswith("."):
-        return False
-
-    # Lines containing date ranges (e.g., 2021 - 2024, Jan 2020 - Present)
     if re.search(r"\b(19|20)\d{2}\b", stripped) and len(stripped) < 95:
         return True
 
-    # Explicit subheader endings (e.g., "Senior Welder:", "ABC Engineering Sdn Bhd")
     if stripped.endswith(":"):
         return True
 
@@ -58,8 +52,8 @@ def is_subheader_line(line, section_type):
     return False
 
 
-def add_section_block(doc, title, content, section_type="general"):
-    """Adds a bold unnumbered header, bold subheaders, and bulleted professional details."""
+def add_section_header(doc, title):
+    """Adds a bold unnumbered section header with a clean bottom divider line."""
     clean_title = strip_header_numbering(title).upper()
     p_head = doc.add_paragraph()
     p_head.paragraph_format.space_before = Pt(11)
@@ -70,7 +64,6 @@ def add_section_block(doc, title, content, section_type="general"):
     run_head.font.size = Pt(11)
     run_head.font.color.rgb = RGBColor(20, 55, 100)
 
-    # Clean bottom divider line under main section header
     pPr = p_head._p.get_or_add_pPr()
     pBdr = OxmlElement("w:pBdr")
     bottom = OxmlElement("w:bottom")
@@ -81,20 +74,34 @@ def add_section_block(doc, title, content, section_type="general"):
     pBdr.append(bottom)
     pPr.append(pBdr)
 
-    lines = [l.strip() for l in content.split("\n") if l.strip()]
-    if not lines:
+
+def add_section_block(doc, title, content, section_type="general", cert_images=None):
+    """Adds a bold unnumbered header, bold subheaders, bulleted details, and any certificate images."""
+    lines = [
+        normalize_exact_text(l).strip()
+        for l in content.split("\n")
+        if l.strip() and not is_noise_or_garbage(l)
+    ]
+    valid_cert_streams = []
+    if cert_images:
+        for img_path in cert_images:
+            stream = get_compatible_image_stream(img_path)
+            if stream:
+                valid_cert_streams.append(stream)
+
+    if not lines and not valid_cert_streams:
         return
 
-    for line in lines:
-        # Remove leading numbering beside subheaders/headers while preserving exact spelling
-        clean_line = strip_header_numbering(line)
-        has_existing_bullet = bool(re.match(r"^[•\-\*▪➢➤]\s*", clean_line))
-        text_body = re.sub(r"^[•\-\*▪➢➤]\s*", "", clean_line).strip()
+    add_section_header(doc, title)
 
-        if not text_body:
+    for line in lines:
+        clean_line = strip_header_numbering(line)
+        has_existing_bullet = bool(re.match(r"^[•\-\*▪➢➤□■]\s*", clean_line))
+        text_body = re.sub(r"^[•\-\*▪➢➤□■\s]+", "", clean_line).strip()
+
+        if not text_body or is_noise_or_garbage(text_body):
             continue
 
-        # Objective is rendered as clean justified/left-aligned prose (unless explicitly bulleted)
         if section_type == "objective" and not has_existing_bullet:
             p = doc.add_paragraph()
             p.paragraph_format.space_after = Pt(3)
@@ -103,7 +110,6 @@ def add_section_block(doc, title, content, section_type="general"):
             r.font.size = Pt(10)
             continue
 
-        # Subheaders (Job Title, Company, Dates, Education Qualification) -> Bold, no bullet, no numbering
         if is_subheader_line(text_body, section_type) and not has_existing_bullet:
             p_sub = doc.add_paragraph()
             p_sub.paragraph_format.space_before = Pt(5)
@@ -114,7 +120,6 @@ def add_section_block(doc, title, content, section_type="general"):
             r_sub.font.size = Pt(10)
             r_sub.font.color.rgb = RGBColor(30, 30, 30)
         else:
-            # Relevant details, duties, courses, skills, certificates -> Clean professional bullet points
             p_bul = doc.add_paragraph()
             p_bul.paragraph_format.left_indent = Inches(0.25)
             p_bul.paragraph_format.first_line_indent = Inches(-0.15)
@@ -127,6 +132,14 @@ def add_section_block(doc, title, content, section_type="general"):
 
             r_txt = p_bul.add_run(text_body)
             r_txt.font.size = Pt(10)
+
+    # Embed scanned certificate images cleanly if present
+    for stream in valid_cert_streams:
+        p_img = doc.add_paragraph()
+        p_img.paragraph_format.space_before = Pt(6)
+        p_img.paragraph_format.space_after = Pt(6)
+        run_img = p_img.add_run()
+        run_img.add_picture(stream, width=Inches(5.8))
 
 
 def set_section_footer(section, position_text):
@@ -163,28 +176,29 @@ def build_single_candidate_doc(candidate):
 
     set_section_footer(doc.sections[-1], candidate.get("position", "Not Specified"))
 
-    table = doc.add_table(rows=1, cols=2)
-    table.autofit = False
-    remove_table_borders(table)
-
-    cell_photo = table.cell(0, 0)
-    cell_details = table.cell(0, 1)
-    cell_photo.width = Inches(1.7)
-    cell_details.width = Inches(4.8)
-
-    # Top-Left Photo
-    p_photo = cell_photo.paragraphs[0]
     img_stream = get_compatible_image_stream(candidate.get("photo_path"))
+
+    # If candidate has a photo, place Photo on Top-Left and Personal Details on Top-Right
     if img_stream:
+        table = doc.add_table(rows=1, cols=2)
+        table.autofit = False
+        remove_table_borders(table)
+
+        cell_photo = table.cell(0, 0)
+        cell_details = table.cell(0, 1)
+        cell_photo.width = Inches(1.7)
+        cell_details.width = Inches(4.8)
+
+        p_photo = cell_photo.paragraphs[0]
         run_img = p_photo.add_run()
         run_img.add_picture(img_stream, width=Inches(1.45))
+        details_container = cell_details
+        p_name = details_container.paragraphs[0]
     else:
-        run_no_img = p_photo.add_run("[Candidate Photo]")
-        run_no_img.italic = True
-        run_no_img.font.size = Pt(9)
+        # No photo in resume -> Clean full-width personal details header without empty placeholder box
+        details_container = doc
+        p_name = doc.add_paragraph()
 
-    # Top-Right Standardized Personal Details
-    p_name = cell_details.paragraphs[0]
     p_name.paragraph_format.space_after = Pt(4)
     r_name = p_name.add_run(strip_header_numbering(candidate["name"]).upper())
     r_name.bold = True
@@ -202,7 +216,7 @@ def build_single_candidate_doc(candidate):
     ]
 
     for label, val in details_fields:
-        p = cell_details.add_paragraph()
+        p = details_container.add_paragraph()
         p.paragraph_format.space_after = Pt(1.5)
         r_lbl = p.add_run(f"{label}: ")
         r_lbl.bold = True
@@ -210,13 +224,18 @@ def build_single_candidate_doc(candidate):
         r_val = p.add_run(str(val))
         r_val.font.size = Pt(9.5)
 
-    # Standardized Resume Sections
     add_section_block(doc, "Objective", candidate["objective"], section_type="objective")
     add_section_block(doc, "Education", candidate["education"], section_type="education")
     add_section_block(doc, "Course & Training Attended", candidate["courses"], section_type="courses")
     add_section_block(doc, "Working Experience", candidate["experience"], section_type="experience")
     add_section_block(doc, "Skills & Capabilities", candidate["skills"], section_type="skills")
-    add_section_block(doc, "Certificates", candidate["certificates"], section_type="certificates")
+    add_section_block(
+        doc,
+        "Certificates",
+        candidate["certificates"],
+        section_type="certificates",
+        cert_images=candidate.get("cert_images", []),
+    )
 
     return doc
 

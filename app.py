@@ -11,7 +11,6 @@ DB_FILE = "database.json"
 SAVE_DIR = "saved_resumes"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-# Staff Login Accounts (Add or edit credentials here)
 VALID_USERS = {
     "admin": "admin123",
     "hr@company.com": "hr2026",
@@ -37,9 +36,6 @@ if "user" not in st.session_state:
     st.session_state.user = ""
 
 
-# ==========================================
-# PAGE 1: LOGIN PAGE
-# ==========================================
 def login_page():
     col1, col2, col3 = st.columns([1, 1.3, 1])
     with col2:
@@ -74,9 +70,6 @@ def login_page():
                 st.error("Invalid Username/Email or Password.")
 
 
-# ==========================================
-# PAGE 2: RESUME UPLOAD, REVIEW & EXPORT
-# ==========================================
 def main_portal():
     with st.sidebar:
         if os.path.exists("logo.png"):
@@ -93,12 +86,10 @@ def main_portal():
     job_list = extract_jobs_from_pdf()
     candidates = load_db()
 
-    # Section 1: Unlimited Persistent Upload
     st.subheader("Upload Candidate Resumes")
     default_job = st.selectbox(
         "Default Position Applied For (Batch Upload)",
         options=job_list,
-        help="Automatically assigns this position to newly uploaded resumes. You can also adjust each candidate individually below.",
     )
 
     uploaded_files = st.file_uploader(
@@ -125,12 +116,10 @@ def main_portal():
 
         if newly_added > 0:
             save_db(candidates)
-            st.success(f"Saved {newly_added} new resume(s) permanently to the database.")
+            st.success(f"Saved {newly_added} new resume(s) permanently.")
             st.rerun()
 
     st.divider()
-
-    # Section 2: Review, Standardize & Assign Position
     st.subheader(f"Saved Candidate Resumes ({len(candidates)})")
 
     if not candidates:
@@ -148,10 +137,10 @@ def main_portal():
                 if cand.get("photo_path") and os.path.exists(cand["photo_path"]):
                     st.image(cand["photo_path"], width=150)
                 else:
-                    st.caption("No photo detected in CV")
+                    st.caption("No photo in resume (optional)")
 
                 new_photo = st.file_uploader(
-                    "Replace/Upload Photo", type=["png", "jpg", "jpeg"], key=f"photo_{cand['id']}"
+                    "Upload/Replace Photo", type=["png", "jpg", "jpeg"], key=f"photo_{cand['id']}"
                 )
                 if new_photo:
                     p_path = os.path.join(SAVE_DIR, "photos", f"{cand['id']}_{new_photo.name}")
@@ -188,7 +177,32 @@ def main_portal():
             cand["courses"] = st.text_area("Course & Training Attended", cand["courses"], height=110, key=f"crs_{cand['id']}")
             cand["experience"] = st.text_area("Working Experience", cand["experience"], height=160, key=f"exp_{cand['id']}")
             cand["skills"] = st.text_area("Skills & Capabilities", cand["skills"], height=110, key=f"skl_{cand['id']}")
-            cand["certificates"] = st.text_area("Certificates", cand["certificates"], height=110, key=f"crt_{cand['id']}")
+            cand["certificates"] = st.text_area("Certificates (Text List)", cand["certificates"], height=110, key=f"crt_{cand['id']}")
+
+            # Certificate Images Preview & Optional Upload
+            existing_cert_imgs = [p for p in cand.get("cert_images", []) if os.path.exists(p)]
+            if existing_cert_imgs:
+                st.caption(f"Attached Certificate Images ({len(existing_cert_imgs)}):")
+                img_cols = st.columns(min(4, len(existing_cert_imgs)))
+                for i, c_img in enumerate(existing_cert_imgs):
+                    img_cols[i % 4].image(c_img, use_container_width=True)
+
+            extra_certs = st.file_uploader(
+                "Add Certificate Images (Optional)",
+                type=["png", "jpg", "jpeg"],
+                accept_multiple_files=True,
+                key=f"cert_up_{cand['id']}",
+            )
+            if extra_certs:
+                cert_list = cand.get("cert_images", [])
+                for ec in extra_certs:
+                    ec_path = os.path.join(SAVE_DIR, "cert_images", f"{cand['id']}_{ec.name}")
+                    if ec_path not in cert_list:
+                        with open(ec_path, "wb") as ef:
+                            ef.write(ec.getbuffer())
+                        cert_list.append(ec_path)
+                        updated = True
+                cand["cert_images"] = cert_list
 
             btn_save, btn_del = st.columns([1, 5])
             if btn_save.button("Save Changes", key=f"save_{cand['id']}"):
@@ -206,8 +220,6 @@ def main_portal():
         st.rerun()
 
     st.divider()
-
-    # Section 3: Export All Standardized Resumes into One Company Template DOCX
     st.subheader("Export Compiled Document for Boss Review")
     if st.button("Generate Consolidated Word Document (etc.docx)", type="primary"):
         output_filename = "Compiled_PreScreened_Resumes.docx"
