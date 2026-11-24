@@ -2,6 +2,7 @@ import os
 import re
 import unicodedata
 import fitz  # PyMuPDF
+import pdfplumber
 from docx import Document
 
 PHOTO_DIR = os.path.join("saved_resumes", "photos")
@@ -53,6 +54,58 @@ def strip_all_bullet_shapes(text):
     return re.sub(ALL_BULLET_CHARS_PATTERN, "", text).strip()
 
 
+def repair_pdf_spelling_artifacts(text):
+    """Fixes common PDF font-encoding & kerning typos while preserving exact names and terms."""
+    if not text:
+        return ""
+
+    text = unicodedata.normalize("NFKC", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"[\ue000-\uf8ff\u25a0-\u27bf]", "", text)
+
+    def collapse_spaced_caps(match):
+        return match.group(0).replace(" ", "")
+
+    text = re.sub(r"\b(?:[A-Z]\s){3,}[A-Z]\b", collapse_spaced_caps, text)
+    text = re.sub(r"([a-z])\.([A-Z])", r"\1. \2", text)
+    text = re.sub(r",([A-Za-z])", r", \1", text)
+    text = re.sub(r"([a-z]{2,})([A-Z][a-z]{2,})", r"\1 \2", text)
+
+    word_fixes = {
+        r"\bExperince\b": "Experience",
+        r"\bExperiance\b": "Experience",
+        r"\bResponsibilites\b": "Responsibilities",
+        r"\bResponsiblities\b": "Responsibilities",
+        r"\bResponsibilties\b": "Responsibilities",
+        r"\bQualifcation\b": "Qualification",
+        r"\bQualifcations\b": "Qualifications",
+        r"\bCertifcate\b": "Certificate",
+        r"\bCertifcates\b": "Certificates",
+        r"\bCertifcation\b": "Certification",
+        r"\bMaintanance\b": "Maintenance",
+        r"\bMaintenence\b": "Maintenance",
+        r"\bEquipments\b": "Equipment",
+        r"\bEngineeering\b": "Engineering",
+        r"\bEnginner\b": "Engineer",
+        r"\bTechincian\b": "Technician",
+        r"\bSuperviser\b": "Supervisor",
+        r"\bCoordiantor\b": "Coordinator",
+        r"\bManagment\b": "Management",
+        r"\bDepartement\b": "Department",
+        r"\bCommisioning\b": "Commissioning",
+        r"\bFabricaton\b": "Fabrication",
+        r"\bInstallaton\b": "Installation",
+        r"\bInspecton\b": "Inspection",
+        r"\bSafetly\b": "Safety",
+        r"\bMalaysian\s+NRIC\b": "Malaysian",
+    }
+    for pattern, replacement in word_fixes.items():
+        text = re.sub(pattern, replacement, text)
+
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text.strip()
+
+
 def is_noise_or_garbage(text):
     """Filters out page numbers and garbled OCR artifacts."""
     if not text:
@@ -79,18 +132,6 @@ def is_noise_or_garbage(text):
     return False
 
 
-def normalize_exact_text(text):
-    """Normalizes Unicode ligatures and removes private-use Wingdings/box glyphs."""
-    if not text:
-        return ""
-    text = unicodedata.normalize("NFKC", text)
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-    text = re.sub(r"[\ue000-\uf8ff\u25a0-\u27bf]", "", text)
-    # Collapse multiple spaces within the same line without altering words
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip()
-
-
 def strip_header_numbering(text):
     """Removes any numbering beside headers and subheaders while preserving exact wording."""
     cleaned = re.sub(
@@ -104,19 +145,15 @@ def strip_header_numbering(text):
 def is_standalone_subheader(line):
     """Identifies company names, job titles, date ranges, or degrees that must stay on their own line."""
     stripped = strip_all_bullet_shapes(line).strip()
-    if not stripped or len(stripped) > 105:
-        return False
-    if stripped.endswith("."):
+    if not stripped or len(stripped) > 105 or stripped.endswith("."):
         return False
     if stripped.endswith(":"):
         return True
-    # Date ranges (e.g., Jan 2021 - Present, 2019 - 2022)
     if re.search(r"\b(19|20)\d{2}\b", stripped) and len(stripped) < 85:
         return True
-    # All-caps company/role/institution header (e.g., "PETRONAS CARIGALI SDN BHD")
     if stripped.isupper() and 4 <= len(stripped) <= 85:
         return True
-    # Short title/company line containing role or organization keywords
+
     role_org_words = (
         "sdn bhd", "bhd", "ltd", "inc", "corp", "company", "engineering",
         "services", "offshore", "oil", "gas", "petronas", "shell",
@@ -132,10 +169,7 @@ def is_standalone_subheader(line):
 
 
 def merge_wrapped_lines(lines, is_prose=False):
-    """
-    Rejoins PDF line-wrapped sentences so one full bullet or paragraph is never split
-    into multiple separate bullets.
-    """
+    """Rejoins PDF line-wrapped sentences so one full bullet or paragraph stays intact."""
     if not lines:
         return ""
 
@@ -157,34 +191,23 @@ def merge_wrapped_lines(lines, is_prose=False):
         prev = merged[-1]
         prev_no_bullet = strip_all_bullet_shapes(prev)
 
-        # Keep subheaders and explicit new bullets on separate lines
         if starts_with_bullet or is_standalone_subheader(text_no_bullet) or is_standalone_subheader(prev_no_bullet):
             merged.append(f"• {text_no_bullet}" if starts_with_bullet else text_no_bullet)
             continue
 
-        # Join wrapped continuation lines into the same full sentence/bullet
         prev_ended_sentence = bool(re.search(r"[\.\!\?;:]$", prev_no_bullet))
         starts_continuation = bool(re.match(r"^[a-z0-9\(,&/\-]", text_no_bullet))
 
-        if is_prose:
-            # Objective paragraphs merge cleanly into cohesive sentences
-            if not prev_ended_sentence or starts_continuation:
-                merged[-1] = f"{prev} {text_no_bullet}"
-            else:
-                merged.append(text_no_bullet)
+        if not prev_ended_sentence or starts_continuation:
+            merged[-1] = f"{prev} {text_no_bullet}"
         else:
-            # In bulleted sections, join if previous line did NOT finish a sentence
-            # or if the next line starts with a lowercase/continuation word
-            if not prev_ended_sentence or starts_continuation:
-                merged[-1] = f"{prev} {text_no_bullet}"
-            else:
-                merged.append(text_no_bullet)
+            merged.append(text_no_bullet)
 
     return "\n".join(merged)
 
 
 def extract_candidate_name(lines, raw_text, default_filename):
-    """Extracts the candidate's actual full name, skipping cover-letter greetings."""
+    """Extracts the candidate's actual full name, skipping cover-letter salutations."""
     explicit_name = re.search(
         r"^(?:Full\s+)?Name\s*[:\-]\s*([A-Za-z][A-Za-z\s\.'/@\-]{2,60})$",
         raw_text,
@@ -371,18 +394,28 @@ def extract_images_from_docx(docx_path, candidate_id):
 
 
 def extract_verbatim_lines_from_pdf(pdf_path):
-    """Extracts clean, readable lines in strict visual reading order."""
-    doc = fitz.open(pdf_path)
+    """Uses pdfplumber with tight character-coordinate tolerances to extract exact spelling."""
     all_lines = []
-    for page in doc:
-        blocks = page.get_text("blocks", sort=True)
-        for b in blocks:
-            if b[6] == 0:
-                block_text = normalize_exact_text(b[4])
-                for line in block_text.split("\n"):
-                    clean = line.strip()
-                    if clean and not is_noise_or_garbage(clean):
-                        all_lines.append(clean)
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text(x_tolerance=2, y_tolerance=3, layout=False)
+                if not text:
+                    continue
+                for line in text.split("\n"):
+                    repaired = repair_pdf_spelling_artifacts(line)
+                    if repaired and not is_noise_or_garbage(repaired):
+                        all_lines.append(repaired)
+    except Exception:
+        doc = fitz.open(pdf_path)
+        for page in doc:
+            blocks = page.get_text("blocks", sort=True)
+            for b in blocks:
+                if b[6] == 0:
+                    for line in b[4].split("\n"):
+                        repaired = repair_pdf_spelling_artifacts(line)
+                        if repaired and not is_noise_or_garbage(repaired):
+                            all_lines.append(repaired)
     return all_lines
 
 
@@ -391,24 +424,21 @@ def extract_verbatim_lines_from_docx(docx_path):
     doc = Document(docx_path)
     all_lines = []
     for p in doc.paragraphs:
-        clean = normalize_exact_text(p.text)
+        clean = repair_pdf_spelling_artifacts(p.text)
         if clean and not is_noise_or_garbage(clean):
             all_lines.append(clean)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
-                    clean = normalize_exact_text(p.text)
+                    clean = repair_pdf_spelling_artifacts(p.text)
                     if clean and not is_noise_or_garbage(clean) and clean not in all_lines:
                         all_lines.append(clean)
     return all_lines
 
 
 def match_section_header(line):
-    """
-    Strictly matches standalone resume section headers so normal sentences inside
-    experience or education never accidentally trigger a section switch.
-    """
+    """Strictly matches standalone resume section headers so sections never mix."""
     cleaned = strip_all_bullet_shapes(strip_header_numbering(line)).rstrip(":").strip()
     if not cleaned or len(cleaned) > 45 or cleaned.endswith("."):
         return None
@@ -461,7 +491,7 @@ def match_section_header(line):
 
 
 def parse_resume_file(file_path, candidate_id, default_filename):
-    """Extracts exact, unmixed, sentence-complete resume sections."""
+    """Extracts exact, spelling-accurate, unmixed resume sections."""
     ext = os.path.splitext(file_path)[1].lower()
     lines = []
     photo_path = None
@@ -496,14 +526,6 @@ def parse_resume_file(file_path, candidate_id, default_filename):
         elif current_section and current_section != "ignore":
             sections[current_section].append(strip_header_numbering(line))
 
-    # Reconstruct full sentences/bullets cleanly per section; default to "N/A" if empty
-    objective_text = merge_wrapped_lines(sections["objective"], is_prose=True) or "N/A"
-    education_text = merge_wrapped_lines(sections["education"], is_prose=False) or "N/A"
-    courses_text = merge_wrapped_lines(sections["courses"], is_prose=False) or "N/A"
-    experience_text = merge_wrapped_lines(sections["experience"], is_prose=False) or "N/A"
-    skills_text = merge_wrapped_lines(sections["skills"], is_prose=False) or "N/A"
-    certificates_text = merge_wrapped_lines(sections["certificates"], is_prose=False) or "N/A"
-
     return {
         "id": candidate_id,
         "filename": default_filename,
@@ -519,10 +541,10 @@ def parse_resume_file(file_path, candidate_id, default_filename):
         "nationality": personal["nationality"],
         "marital_status": personal["marital_status"],
         "address": personal["address"],
-        "objective": objective_text,
-        "education": education_text,
-        "courses": courses_text,
-        "experience": experience_text,
-        "skills": skills_text,
-        "certificates": certificates_text,
+        "objective": merge_wrapped_lines(sections["objective"], is_prose=True) or "N/A",
+        "education": merge_wrapped_lines(sections["education"], is_prose=False) or "N/A",
+        "courses": merge_wrapped_lines(sections["courses"], is_prose=False) or "N/A",
+        "experience": merge_wrapped_lines(sections["experience"], is_prose=False) or "N/A",
+        "skills": merge_wrapped_lines(sections["skills"], is_prose=False) or "N/A",
+        "certificates": merge_wrapped_lines(sections["certificates"], is_prose=False) or "N/A",
     }

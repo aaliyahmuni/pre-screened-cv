@@ -13,7 +13,7 @@ from parser_engine import (
     strip_header_numbering,
     strip_all_bullet_shapes,
     is_noise_or_garbage,
-    normalize_exact_text,
+    repair_pdf_spelling_artifacts,
     is_standalone_subheader,
     ALL_BULLET_CHARS_PATTERN,
 )
@@ -116,7 +116,7 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
         return
 
     lines = [
-        normalize_exact_text(l).strip()
+        repair_pdf_spelling_artifacts(l).strip()
         for l in raw_clean.split("\n")
         if l.strip() and l.strip().upper() != "N/A" and not is_noise_or_garbage(l)
     ]
@@ -133,7 +133,6 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
         if not text_body or is_noise_or_garbage(text_body):
             continue
 
-        # Objective rendered as complete prose paragraph(s)
         if section_type == "objective" and not has_existing_bullet:
             p = doc.add_paragraph()
             p.paragraph_format.space_after = Pt(3)
@@ -144,7 +143,6 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             r.font.color.rgb = DARK_TEXT
             continue
 
-        # Bold Subheaders (Companies, Job Titles, Dates, Qualifications)
         if (
             section_type in ("experience", "education", "courses")
             and is_standalone_subheader(text_body)
@@ -160,7 +158,6 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             r_sub.font.size = Pt(10)
             r_sub.font.color.rgb = DARK_TEXT
         else:
-            # One single • bullet per complete point/sentence
             p_bul = doc.add_paragraph()
             p_bul.paragraph_format.left_indent = Inches(0.25)
             p_bul.paragraph_format.first_line_indent = Inches(-0.15)
@@ -178,7 +175,6 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             r_txt.font.size = Pt(10)
             r_txt.font.color.rgb = DARK_TEXT
 
-    # Insert crisp certificate attachments if present
     for stream in valid_cert_streams:
         p_img = doc.add_paragraph()
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -224,7 +220,6 @@ def build_single_candidate_doc(candidate):
 
     set_section_footer(doc.sections[-1], candidate.get("position", "Not Specified"))
 
-    # Top Header Block: Photo on Top-Left Corner | Personal Details on the Side
     header_table = doc.add_table(rows=1, cols=2)
     header_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     header_table.autofit = False
@@ -305,7 +300,6 @@ def build_single_candidate_doc(candidate):
         r_v.font.size = Pt(9.5)
         r_v.font.color.rgb = DARK_TEXT
 
-    # Standardized Body Sections (Strict Order, Cleanly Separated, N/A if Missing)
     add_section_block(doc, "Objective", candidate.get("objective", "N/A"), section_type="objective")
     add_section_block(doc, "Education", candidate.get("education", "N/A"), section_type="education")
     add_section_block(doc, "Course & Training Attended", candidate.get("courses", "N/A"), section_type="courses")

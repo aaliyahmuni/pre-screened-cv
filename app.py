@@ -183,7 +183,6 @@ def main_portal():
             cand["skills"] = st.text_area("Skills & Capabilities", cand["skills"], height=110, key=f"skl_{cand['id']}")
             cand["certificates"] = st.text_area("Certificates (Text List)", cand["certificates"], height=110, key=f"crt_{cand['id']}")
 
-            # Direct High-Resolution Certificate Insertion (PNG, JPG, or PDF)
             existing_cert_imgs = [p for p in cand.get("cert_images", []) if os.path.exists(p)]
             if existing_cert_imgs:
                 st.caption(f"Attached Certificates ({len(existing_cert_imgs)}):")
