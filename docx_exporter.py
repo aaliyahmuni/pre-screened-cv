@@ -14,6 +14,7 @@ from parser_engine import (
     strip_all_bullet_shapes,
     is_noise_or_garbage,
     normalize_exact_text,
+    is_standalone_subheader,
     ALL_BULLET_CHARS_PATTERN,
 )
 
@@ -63,36 +64,6 @@ def remove_table_borders(table):
     tblPr.append(borders)
 
 
-def is_subheader_line(line, section_type):
-    """Detects job titles, company names, date ranges, or qualifications so they render in bold."""
-    stripped = strip_all_bullet_shapes(line)
-    if not stripped or len(stripped) > 110 or stripped.endswith("."):
-        return False
-
-    if re.search(r"\b(19|20)\d{2}\b", stripped) and len(stripped) < 95:
-        return True
-
-    if stripped.endswith(":"):
-        return True
-
-    if section_type in ("experience", "education", "courses"):
-        role_or_org_words = (
-            "sdn bhd", "bhd", "ltd", "inc", "corp", "company", "engineering",
-            "services", "offshore", "oil", "gas", "petronas", "shell", "sarawak",
-            "university", "universiti", "college", "institute", "politeknik",
-            "diploma", "degree", "bachelor", "master", "certificate", "spm", "stpm",
-            "engineer", "supervisor", "technician", "welder", "fitter", "inspector",
-            "manager", "officer", "coordinator", "lead", "rigger", "operator",
-            "specialist", "advisor", "accountant", "controller", "storekeeper",
-            "client", "project", "contractor"
-        )
-        words = stripped.split()
-        if len(words) <= 11 and any(w in stripped.lower() for w in role_or_org_words):
-            return True
-
-    return False
-
-
 def add_section_header(doc, title):
     """Adds a uniform, unnumbered bold navy section header with a clean bottom rule."""
     clean_title = strip_header_numbering(title).upper()
@@ -118,16 +89,21 @@ def add_section_header(doc, title):
     pPr.append(pBdr)
 
 
+def add_na_paragraph(doc):
+    """Outputs a clean 'N/A' entry when a resume has no data for a section."""
+    p_na = doc.add_paragraph()
+    p_na.paragraph_format.space_after = Pt(3)
+    r_na = p_na.add_run("N/A")
+    r_na.font.name = "Calibri"
+    r_na.font.size = Pt(10)
+    r_na.font.color.rgb = MUTED_TEXT
+
+
 def add_section_block(doc, title, content, section_type="general", cert_images=None):
-    """Renders every standardized resume section uniformly for boss review."""
+    """Renders every standardized resume section neatly without splitting complete sentences."""
     add_section_header(doc, title)
 
-    lines = [
-        normalize_exact_text(l).strip()
-        for l in (content or "").split("\n")
-        if l.strip() and not is_noise_or_garbage(l)
-    ]
-
+    raw_clean = (content or "").strip()
     valid_cert_streams = []
     if cert_images:
         for img_path in cert_images:
@@ -135,14 +111,18 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             if stream:
                 valid_cert_streams.append(stream)
 
+    if (not raw_clean or raw_clean.upper() == "N/A") and not valid_cert_streams:
+        add_na_paragraph(doc)
+        return
+
+    lines = [
+        normalize_exact_text(l).strip()
+        for l in raw_clean.split("\n")
+        if l.strip() and l.strip().upper() != "N/A" and not is_noise_or_garbage(l)
+    ]
+
     if not lines and not valid_cert_streams:
-        p_empty = doc.add_paragraph()
-        p_empty.paragraph_format.space_after = Pt(3)
-        r_emp = p_empty.add_run("None listed.")
-        r_emp.italic = True
-        r_emp.font.name = "Calibri"
-        r_emp.font.size = Pt(10)
-        r_emp.font.color.rgb = MUTED_TEXT
+        add_na_paragraph(doc)
         return
 
     for line in lines:
@@ -153,7 +133,7 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
         if not text_body or is_noise_or_garbage(text_body):
             continue
 
-        # Objective paragraph formatting
+        # Objective rendered as complete prose paragraph(s)
         if section_type == "objective" and not has_existing_bullet:
             p = doc.add_paragraph()
             p.paragraph_format.space_after = Pt(3)
@@ -164,8 +144,12 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             r.font.color.rgb = DARK_TEXT
             continue
 
-        # Bold Subheaders (Companies, Job Titles, Dates, Degrees)
-        if is_subheader_line(text_body, section_type) and not has_existing_bullet:
+        # Bold Subheaders (Companies, Job Titles, Dates, Qualifications)
+        if (
+            section_type in ("experience", "education", "courses")
+            and is_standalone_subheader(text_body)
+            and not has_existing_bullet
+        ):
             p_sub = doc.add_paragraph()
             p_sub.paragraph_format.space_before = Pt(5)
             p_sub.paragraph_format.space_after = Pt(1.5)
@@ -176,11 +160,11 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             r_sub.font.size = Pt(10)
             r_sub.font.color.rgb = DARK_TEXT
         else:
-            # Standardized • Bullet Points for all detailed information
+            # One single • bullet per complete point/sentence
             p_bul = doc.add_paragraph()
             p_bul.paragraph_format.left_indent = Inches(0.25)
             p_bul.paragraph_format.first_line_indent = Inches(-0.15)
-            p_bul.paragraph_format.space_after = Pt(2)
+            p_bul.paragraph_format.space_after = Pt(2.5)
             p_bul.paragraph_format.line_spacing = 1.15
 
             r_dot = p_bul.add_run("•  ")
@@ -194,7 +178,7 @@ def add_section_block(doc, title, content, section_type="general", cert_images=N
             r_txt.font.size = Pt(10)
             r_txt.font.color.rgb = DARK_TEXT
 
-    # Insert crisp certificate attachments if provided
+    # Insert crisp certificate attachments if present
     for stream in valid_cert_streams:
         p_img = doc.add_paragraph()
         p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -240,9 +224,7 @@ def build_single_candidate_doc(candidate):
 
     set_section_footer(doc.sections[-1], candidate.get("position", "Not Specified"))
 
-    # =========================================================================
-    # TOP HEADER BLOCK: Photo on Top-Left Corner | Personal Details on the Side
-    # =========================================================================
+    # Top Header Block: Photo on Top-Left Corner | Personal Details on the Side
     header_table = doc.add_table(rows=1, cols=2)
     header_table.alignment = WD_TABLE_ALIGNMENT.CENTER
     header_table.autofit = False
@@ -255,13 +237,11 @@ def build_single_candidate_doc(candidate):
     cell_photo.vertical_alignment = WD_ALIGN_VERTICAL.TOP
     cell_details.vertical_alignment = WD_ALIGN_VERTICAL.TOP
 
-    # Clean subtle frame around the top-left photo box
     photo_border = {"val": "single", "sz": 6, "color": "143764"}
     set_cell_borders(cell_photo, top=photo_border, bottom=photo_border, left=photo_border, right=photo_border)
     set_cell_margins(cell_photo, top=60, bottom=60, left=60, right=60)
     set_cell_margins(cell_details, top=20, bottom=20, left=180, right=40)
 
-    # Top-Left: Candidate Photo
     p_photo = cell_photo.paragraphs[0]
     p_photo.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_photo.paragraph_format.space_after = Pt(0)
@@ -272,13 +252,12 @@ def build_single_candidate_doc(candidate):
     else:
         p_photo.paragraph_format.space_before = Pt(35)
         p_photo.paragraph_format.space_after = Pt(35)
-        run_no_img = p_photo.add_run("PHOTO\nNOT PROVIDED")
+        run_no_img = p_photo.add_run("PHOTO\nN/A")
         run_no_img.bold = True
         run_no_img.font.name = "Calibri"
         run_no_img.font.size = Pt(8.5)
         run_no_img.font.color.rgb = MUTED_TEXT
 
-    # Top-Right (Side of Photo): Candidate Full Name + Standardized Personal Details
     p_name = cell_details.paragraphs[0]
     p_name.paragraph_format.space_before = Pt(0)
     p_name.paragraph_format.space_after = Pt(6)
@@ -289,19 +268,18 @@ def build_single_candidate_doc(candidate):
     r_name.font.size = Pt(15)
     r_name.font.color.rgb = PRIMARY_COLOR
 
-    # Nested clean 2-column personal details grid beside the photo
     details_table = cell_details.add_table(rows=7, cols=2)
     details_table.autofit = False
     remove_table_borders(details_table)
 
     details_fields = [
-        ("Phone Number", candidate.get("phone", "Not Provided")),
-        ("Email", candidate.get("email", "Not Provided")),
-        ("Gender", candidate.get("gender", "Not Provided")),
-        ("Age", candidate.get("age", "Not Provided")),
-        ("Nationality", candidate.get("nationality", "Not Provided")),
-        ("Marital Status", candidate.get("marital_status", "Not Provided")),
-        ("Address", candidate.get("address", "Not Provided")),
+        ("Phone Number", candidate.get("phone") or "N/A"),
+        ("Email", candidate.get("email") or "N/A"),
+        ("Gender", candidate.get("gender") or "N/A"),
+        ("Age", candidate.get("age") or "N/A"),
+        ("Nationality", candidate.get("nationality") or "N/A"),
+        ("Marital Status", candidate.get("marital_status") or "N/A"),
+        ("Address", candidate.get("address") or "N/A"),
     ]
 
     for row_idx, (label, val) in enumerate(details_fields):
@@ -322,23 +300,21 @@ def build_single_candidate_doc(candidate):
 
         p_v = c_val.paragraphs[0]
         p_v.paragraph_format.space_after = Pt(0)
-        r_v = p_v.add_run(str(val or "Not Provided"))
+        r_v = p_v.add_run(str(val or "N/A"))
         r_v.font.name = "Calibri"
         r_v.font.size = Pt(9.5)
         r_v.font.color.rgb = DARK_TEXT
 
-    # =========================================================================
-    # STANDARDIZED BODY SECTIONS (Exact Order for Every Candidate)
-    # =========================================================================
-    add_section_block(doc, "Objective", candidate.get("objective", ""), section_type="objective")
-    add_section_block(doc, "Education", candidate.get("education", ""), section_type="education")
-    add_section_block(doc, "Course & Training Attended", candidate.get("courses", ""), section_type="courses")
-    add_section_block(doc, "Working Experience", candidate.get("experience", ""), section_type="experience")
-    add_section_block(doc, "Skills & Capabilities", candidate.get("skills", ""), section_type="skills")
+    # Standardized Body Sections (Strict Order, Cleanly Separated, N/A if Missing)
+    add_section_block(doc, "Objective", candidate.get("objective", "N/A"), section_type="objective")
+    add_section_block(doc, "Education", candidate.get("education", "N/A"), section_type="education")
+    add_section_block(doc, "Course & Training Attended", candidate.get("courses", "N/A"), section_type="courses")
+    add_section_block(doc, "Working Experience", candidate.get("experience", "N/A"), section_type="experience")
+    add_section_block(doc, "Skills & Capabilities", candidate.get("skills", "N/A"), section_type="skills")
     add_section_block(
         doc,
         "Certificates",
-        candidate.get("certificates", ""),
+        candidate.get("certificates", "N/A"),
         section_type="certificates",
         cert_images=candidate.get("cert_images", []),
     )

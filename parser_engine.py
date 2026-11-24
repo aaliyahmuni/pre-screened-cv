@@ -49,7 +49,7 @@ ALL_BULLET_CHARS_PATTERN = r"^[\s•\-\*▪▫■□●○◦‣⁃➢➣➤➔�
 
 
 def strip_all_bullet_shapes(text):
-    """Removes every bullet shape so only clean • bullets are applied."""
+    """Removes every bullet character shape so only clean • bullets are applied."""
     return re.sub(ALL_BULLET_CHARS_PATTERN, "", text).strip()
 
 
@@ -80,12 +80,14 @@ def is_noise_or_garbage(text):
 
 
 def normalize_exact_text(text):
-    """Normalizes Unicode ligatures and strips private-use Wingdings/box glyphs."""
+    """Normalizes Unicode ligatures and removes private-use Wingdings/box glyphs."""
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", text)
     text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
     text = re.sub(r"[\ue000-\uf8ff\u25a0-\u27bf]", "", text)
+    # Collapse multiple spaces within the same line without altering words
+    text = re.sub(r"[ \t]{2,}", " ", text)
     return text.strip()
 
 
@@ -99,8 +101,90 @@ def strip_header_numbering(text):
     return cleaned.strip()
 
 
+def is_standalone_subheader(line):
+    """Identifies company names, job titles, date ranges, or degrees that must stay on their own line."""
+    stripped = strip_all_bullet_shapes(line).strip()
+    if not stripped or len(stripped) > 105:
+        return False
+    if stripped.endswith("."):
+        return False
+    if stripped.endswith(":"):
+        return True
+    # Date ranges (e.g., Jan 2021 - Present, 2019 - 2022)
+    if re.search(r"\b(19|20)\d{2}\b", stripped) and len(stripped) < 85:
+        return True
+    # All-caps company/role/institution header (e.g., "PETRONAS CARIGALI SDN BHD")
+    if stripped.isupper() and 4 <= len(stripped) <= 85:
+        return True
+    # Short title/company line containing role or organization keywords
+    role_org_words = (
+        "sdn bhd", "bhd", "ltd", "inc", "corp", "company", "engineering",
+        "services", "offshore", "oil", "gas", "petronas", "shell",
+        "university", "universiti", "college", "institute", "politeknik",
+        "diploma", "degree", "bachelor", "master", "certificate", "spm", "stpm",
+        "engineer", "supervisor", "technician", "welder", "fitter", "inspector",
+        "manager", "officer", "coordinator", "lead", "rigger", "operator",
+        "specialist", "advisor", "accountant", "controller", "storekeeper"
+    )
+    if len(stripped.split()) <= 10 and any(w in stripped.lower() for w in role_org_words):
+        return True
+    return False
+
+
+def merge_wrapped_lines(lines, is_prose=False):
+    """
+    Rejoins PDF line-wrapped sentences so one full bullet or paragraph is never split
+    into multiple separate bullets.
+    """
+    if not lines:
+        return ""
+
+    merged = []
+    for raw_line in lines:
+        clean = strip_header_numbering(raw_line).strip()
+        if not clean or is_noise_or_garbage(clean):
+            continue
+
+        starts_with_bullet = bool(re.match(ALL_BULLET_CHARS_PATTERN, clean))
+        text_no_bullet = strip_all_bullet_shapes(clean)
+        if not text_no_bullet:
+            continue
+
+        if not merged:
+            merged.append(f"• {text_no_bullet}" if starts_with_bullet else text_no_bullet)
+            continue
+
+        prev = merged[-1]
+        prev_no_bullet = strip_all_bullet_shapes(prev)
+
+        # Keep subheaders and explicit new bullets on separate lines
+        if starts_with_bullet or is_standalone_subheader(text_no_bullet) or is_standalone_subheader(prev_no_bullet):
+            merged.append(f"• {text_no_bullet}" if starts_with_bullet else text_no_bullet)
+            continue
+
+        # Join wrapped continuation lines into the same full sentence/bullet
+        prev_ended_sentence = bool(re.search(r"[\.\!\?;:]$", prev_no_bullet))
+        starts_continuation = bool(re.match(r"^[a-z0-9\(,&/\-]", text_no_bullet))
+
+        if is_prose:
+            # Objective paragraphs merge cleanly into cohesive sentences
+            if not prev_ended_sentence or starts_continuation:
+                merged[-1] = f"{prev} {text_no_bullet}"
+            else:
+                merged.append(text_no_bullet)
+        else:
+            # In bulleted sections, join if previous line did NOT finish a sentence
+            # or if the next line starts with a lowercase/continuation word
+            if not prev_ended_sentence or starts_continuation:
+                merged[-1] = f"{prev} {text_no_bullet}"
+            else:
+                merged.append(text_no_bullet)
+
+    return "\n".join(merged)
+
+
 def extract_candidate_name(lines, raw_text, default_filename):
-    """Extracts the candidate's actual full name, skipping cover-letter salutations."""
+    """Extracts the candidate's actual full name, skipping cover-letter greetings."""
     explicit_name = re.search(
         r"^(?:Full\s+)?Name\s*[:\-]\s*([A-Za-z][A-Za-z\s\.'/@\-]{2,60})$",
         raw_text,
@@ -158,13 +242,11 @@ def extract_personal_details(lines, raw_text):
     marital_match = re.search(r"\b(?:Marital\s*Status\s*[:\-]?\s*)?(Single|Married|Divorced|Widowed)\b", raw_text, re.IGNORECASE)
     nationality_match = re.search(r"Nationality\s*[:\-]?\s*([A-Za-z\s]{3,30})", raw_text, re.IGNORECASE)
 
-    # Multi-line aware address extraction
-    address_val = "Not Provided"
+    address_val = "N/A"
     for idx, line in enumerate(lines):
         addr_m = re.match(r"^(?:Permanent\s+|Current\s+|Home\s+)?(?:Address|Location)\s*[:\-]?\s*(.*)$", line, re.IGNORECASE)
         if addr_m:
             parts = [addr_m.group(1).strip()] if addr_m.group(1).strip() else []
-            # Check next 1-2 lines if they contain postcode/city/state (e.g., 98000 Miri, Sarawak)
             for nxt in lines[idx + 1 : idx + 3]:
                 if re.search(r"\b\d{5}\b|sarawak|sabah|johor|selangor|kuala lumpur|penang|perak|pahang|kedah|kelantan|terengganu|melaka|negeri sembilan|perlis|malaysia", nxt, re.IGNORECASE) and ":" not in nxt:
                     parts.append(nxt.strip())
@@ -174,21 +256,21 @@ def extract_personal_details(lines, raw_text):
                 address_val = ", ".join(parts)
             break
 
-    gender_val = "Not Provided"
+    gender_val = "N/A"
     if gender_match:
         gender_val = (gender_match.group(1) or gender_match.group(2)).capitalize()
 
-    nat_val = "Not Provided"
+    nat_val = "N/A"
     if nationality_match:
         nat_val = nationality_match.group(1).strip().split("\n")[0].strip()
 
     return {
-        "phone": phone_match.group(1).strip() if phone_match else "Not Provided",
-        "email": email_match.group(0).strip() if email_match else "Not Provided",
+        "phone": phone_match.group(1).strip() if phone_match else "N/A",
+        "email": email_match.group(0).strip() if email_match else "N/A",
         "gender": gender_val,
-        "age": (age_match.group(1) or age_match.group(2)) if age_match else "Not Provided",
+        "age": (age_match.group(1) or age_match.group(2)) if age_match else "N/A",
         "nationality": nat_val,
-        "marital_status": marital_match.group(1).capitalize() if marital_match else "Not Provided",
+        "marital_status": marital_match.group(1).capitalize() if marital_match else "N/A",
         "address": address_val,
     }
 
@@ -322,8 +404,64 @@ def extract_verbatim_lines_from_docx(docx_path):
     return all_lines
 
 
+def match_section_header(line):
+    """
+    Strictly matches standalone resume section headers so normal sentences inside
+    experience or education never accidentally trigger a section switch.
+    """
+    cleaned = strip_all_bullet_shapes(strip_header_numbering(line)).rstrip(":").strip()
+    if not cleaned or len(cleaned) > 45 or cleaned.endswith("."):
+        return None
+
+    lower_clean = re.sub(r"\s+", " ", cleaned.lower())
+
+    exact_section_map = {
+        "objective": {
+            "objective", "career objective", "job objective", "professional objective",
+            "professional summary", "executive summary", "career summary", "summary",
+            "profile", "personal profile", "career profile", "about me",
+        },
+        "education": {
+            "education", "educational", "educational background", "educational qualification",
+            "educational qualifications", "academic", "academic background",
+            "academic qualification", "academic qualifications", "qualification", "qualifications",
+        },
+        "courses": {
+            "course", "courses", "training", "trainings", "courses & training",
+            "courses and training", "course & training", "course & training attended",
+            "courses & training attended", "training attended", "trainings attended",
+            "professional training", "workshops", "seminars", "workshops & seminars",
+        },
+        "experience": {
+            "experience", "experiences", "working experience", "work experience",
+            "employment", "employment history", "work history", "career history",
+            "professional experience", "relevant experience", "industrial experience",
+        },
+        "skills": {
+            "skills", "skill", "capabilities", "skills & capabilities",
+            "skills and capabilities", "key skills", "core skills",
+            "core competencies", "competencies", "technical skills", "areas of expertise",
+        },
+        "certificates": {
+            "certificate", "certificates", "certification", "certifications",
+            "licenses", "licences", "licenses & certifications",
+            "certifications & licenses", "professional certificates", "professional certifications",
+        },
+        "ignore": {
+            "personal details", "personal particulars", "personal information",
+            "reference", "references", "character reference", "character references",
+            "referee", "referees", "declaration", "language", "languages", "hobbies", "interests",
+        },
+    }
+
+    for key, exact_names in exact_section_map.items():
+        if lower_clean in exact_names:
+            return key
+    return None
+
+
 def parse_resume_file(file_path, candidate_id, default_filename):
-    """Extracts exact verbatim text and high-clarity images into standardized resume sections."""
+    """Extracts exact, unmixed, sentence-complete resume sections."""
     ext = os.path.splitext(file_path)[1].lower()
     lines = []
     photo_path = None
@@ -340,57 +478,31 @@ def parse_resume_file(file_path, candidate_id, default_filename):
     candidate_name = extract_candidate_name(lines, raw_text, default_filename)
     personal = extract_personal_details(lines, raw_text)
 
-    section_headers = {
-        "objective": [
-            "objective", "career objective", "professional summary",
-            "executive summary", "summary", "profile", "about me",
-        ],
-        "education": [
-            "education", "academic", "academic qualification",
-            "academic background", "qualification", "educational background",
-        ],
-        "courses": [
-            "course", "training", "courses & training", "course & training",
-            "course & training attended", "training attended", "workshops", "seminars",
-        ],
-        "experience": [
-            "experience", "working experience", "work experience",
-            "employment", "employment history", "career history", "professional experience",
-        ],
-        "skills": [
-            "skills", "capabilities", "skills & capabilities",
-            "key skills", "core competencies", "competencies", "technical skills",
-        ],
-        "certificates": [
-            "certificate", "certificates", "certification",
-            "certifications", "licenses", "licenses & certifications", "professional certificates",
-        ],
-        "ignore": [
-            "reference", "references", "character reference",
-            "character references", "referee", "referees", "declaration",
-        ],
+    sections = {
+        "objective": [],
+        "education": [],
+        "courses": [],
+        "experience": [],
+        "skills": [],
+        "certificates": [],
+        "ignore": [],
     }
-
-    sections = {k: [] for k in section_headers}
     current_section = None
 
     for line in lines:
-        cleaned = strip_header_numbering(line)
-        lower_clean = strip_all_bullet_shapes(cleaned).lower().rstrip(":").strip()
-
-        matched_key = None
-        if len(cleaned) < 55:
-            for key, aliases in section_headers.items():
-                if lower_clean in aliases or any(
-                    lower_clean.startswith(a) and len(lower_clean) < 42 for a in aliases
-                ):
-                    matched_key = key
-                    break
-
+        matched_key = match_section_header(line)
         if matched_key:
             current_section = matched_key
         elif current_section and current_section != "ignore":
-            sections[current_section].append(cleaned)
+            sections[current_section].append(strip_header_numbering(line))
+
+    # Reconstruct full sentences/bullets cleanly per section; default to "N/A" if empty
+    objective_text = merge_wrapped_lines(sections["objective"], is_prose=True) or "N/A"
+    education_text = merge_wrapped_lines(sections["education"], is_prose=False) or "N/A"
+    courses_text = merge_wrapped_lines(sections["courses"], is_prose=False) or "N/A"
+    experience_text = merge_wrapped_lines(sections["experience"], is_prose=False) or "N/A"
+    skills_text = merge_wrapped_lines(sections["skills"], is_prose=False) or "N/A"
+    certificates_text = merge_wrapped_lines(sections["certificates"], is_prose=False) or "N/A"
 
     return {
         "id": candidate_id,
@@ -407,10 +519,10 @@ def parse_resume_file(file_path, candidate_id, default_filename):
         "nationality": personal["nationality"],
         "marital_status": personal["marital_status"],
         "address": personal["address"],
-        "objective": "\n".join(sections["objective"]) or "Not Provided",
-        "education": "\n".join(sections["education"]) or "Not Provided",
-        "courses": "\n".join(sections["courses"]) or "None listed.",
-        "experience": "\n".join(sections["experience"]) or raw_text,
-        "skills": "\n".join(sections["skills"]) or "None listed.",
-        "certificates": "\n".join(sections["certificates"]) or "None listed.",
+        "objective": objective_text,
+        "education": education_text,
+        "courses": courses_text,
+        "experience": experience_text,
+        "skills": skills_text,
+        "certificates": certificates_text,
     }
